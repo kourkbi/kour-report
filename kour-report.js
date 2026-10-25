@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      1.0.1
+// @version      1.0.2
 // @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/R9wuHc6ucg
 // @author       kourkbi
+// @license      MIT
 // @homepageURL  https://github.com/kourkbi/kour-report
 // @updateURL    https://raw.githubusercontent.com/kourkbi/kour-report/main/kour-report.js
 // @downloadURL  https://raw.githubusercontent.com/kourkbi/kour-report/main/kour-report.js

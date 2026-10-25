@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/Discord-Join%20KBI-5865F2?logo=discord&logoColor=white" alt="Join the KBI Discord">
   </a>
   <a href="./LICENSE.md">
-    <img src="https://img.shields.io/badge/License-Kour%20Report%20Community%20License-blue" alt="Kour Report Community License">
+    <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License">
   </a>
 </p>
 
@@ -117,7 +117,4 @@ Join the KBI Discord to discuss the project and reports:
 
 ## 📄 License
 
-This project is distributed under the **Kour Report Community License**, a custom permissive license that allows the script to be used, modified, and redistributed, including in commercial projects, subject to the license terms. These include a prohibition on using the script to spam or abuse the reporting endpoint. Read the full terms in [LICENSE.md](./LICENSE.md).
-
-> [!NOTE]
-> This is a custom project license, not an OSI-approved standard license. If you need compatibility with a standard license, consult the project maintainer before redistributing the project under different terms.
+This project is distributed under the **MIT License**, which permits use, modification, distribution, sublicensing, and sale, provided the copyright and permission notice are included with copies or substantial portions of the software. Read the full terms in [LICENSE.md](./LICENSE.md).
