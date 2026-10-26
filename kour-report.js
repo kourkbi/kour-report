@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      1.0.2
+// @version      1.0.3
 // @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/R9wuHc6ucg
 // @author       kourkbi
 // @license      MIT
@@ -2075,7 +2075,7 @@
     }
 
     /**
-     * Collect a Turnstile token before allowing the pending report to be sent.
+     * Obtain a Turnstile token before allowing the pending report to be sent.
      * @see loadCaptchaApi
      * @see sendReport
      * @see resetReportCaptcha
@@ -2651,14 +2651,14 @@
             }
 
             const reportSucceeded = response.status === 201 &&
-                responseData?.code === "KOUR_REPORTS_API_REPORT_SUBMITTED" &&
+                responseData?.code === "KOUR_REPORT_API_REPORT_SUBMITTED" &&
                 responseData?.success !== false &&
                 responseData?.message === "Report submitted successfully.";
             if (reportSucceeded) {
                 showUnityReportNotification("Your report was sent successfully.");
                 setReportFormStatus(responseData.message, "success");
             } else {
-                const retryAfterSeconds = responseData?.code === "KOUR_REPORTS_API_REPORT_COOLDOWN"
+                const retryAfterSeconds = responseData?.code === "KOUR_REPORT_API_REPORT_COOLDOWN"
                     ? getRetryAfterSeconds(response)
                     : null;
                 const retryMessage = retryAfterSeconds === null

@@ -1,4 +1,4 @@
 {
-  "version": "1.0.2",
-  "details": "Updated the project license to MIT."
+  "version": "1.0.3",
+  "details": "Aligned report response handling with the API reference."
 }
