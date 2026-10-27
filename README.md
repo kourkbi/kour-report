@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/kourkbi-report-script-banner.jpg" alt="Report hackers to the K.B.I. — Kour Report" width="100%">
-</p>
-
 <h1 align="center">Kour Report</h1>
 
 <p align="center">
@@ -28,20 +24,28 @@ The userscript is **[kour-report.js](./kour-report.js)**. Install this file to u
 ## 🚀 Installation
 
 1. Install a userscript manager compatible with your browser, such as Tampermonkey or Violentmonkey.
-2. Open [kour-report.js](./kour-report.js), copy its contents, and create a new userscript in your manager. You can also import the file if your manager supports it.
-3. Save the script and open or reload [Kour.io](https://kour.io/).
-4. Join a match and press **Left Alt** to open the report menu, or select the report icon.
+2. **Recommended:** install [Kour Report from Greasy Fork](https://greasyfork.org/scripts/602206-kour-report). Open the page and press **Install**; your userscript manager will guide you through the installation.
+3. Alternatively, open [kour-report.js](./kour-report.js) on GitHub, copy its contents, and create a new userscript in your manager. You can also import the file if your manager supports it.
+4. Open or reload [Kour.io](https://kour.io/). Press **Left Alt** to open the report menu, or select the report icon. You can open the menu in the lobby and submit a manual report without joining a match.
+
+Greasy Fork and GitHub provide the same version of the script and are kept up to date together. Greasy Fork is the easiest option because your userscript manager handles installation and updates.
 
 In **Settings**, you can change the menu shortcut and the shortcut for showing or hiding the icon. You can also adjust the icon's size and opacity, hide it, and enable dragging to reposition it.
 
 > [!NOTE]
 > The default menu shortcut is **Left Alt**, and the default shortcut for showing or hiding the icon is **Right Alt**. Both shortcuts can be changed in settings.
 
+When a newer version is available, the report icon displays an update badge and the game shows a notification. Open the menu and select **Update** to choose Greasy Fork (recommended) or GitHub.
+
 ## 🖼️ Screenshots
 
 ### Report Menu
 
 ![The report menu showing players in the current room and report options.](./assets/report-menu.png)
+
+### Report Manually
+
+![The manual report menu for entering a player's name when reporting.](./assets/manually-report-menu.png)
 
 ### Report Details Menu
 
@@ -53,12 +57,14 @@ In **Settings**, you can change the menu shortcut and the shortcut for showing o
 
 ## ⚙️ How It Works
 
-1. When run on Kour.io, the script detects the current match and lists the players in the room.
-2. Select a player and choose a reason: **Invisibility**, **Aimbot**, **Flying**, **Wallhack**, or **Other**.
-3. Optionally add details (up to 250 characters).
+1. When run on Kour.io, the script detects the current match and lists other players in the room. The **Players** heading and player count appear only when there are players to report.
+2. Select a detected player or choose **Report manually** to enter a name yourself. Manual reporting is available in the lobby and at any time; when no players are detected, the button appears with the empty-state message, and when players are listed it appears below them. Choose a reason: **Invisibility**, **Aimbot**, **Flying**, **Wallhack**, or **Other**. If detection returns no players in a match, the menu notes that the room may be empty or detection may have failed.
+3. Optionally add details. The selected reason and additional details together can contain up to 250 characters.
 4. Complete the Cloudflare Turnstile security check to submit the report. The result is shown in the report menu.
 
-The selected player must still be in the current match, and the room ID must be valid. Report submission is handled by the KBI service, which can reject reports that do not meet its validation requirements.
+For an automatic report, the selected player must still be in the current match. Choose **Report manually** at any time to enter the player's name yourself. If you do not know the full name or it is difficult to spell, use the **?** beside the name field for help; you can leave the field blank or enter only the part you know.
+
+The room link is filled in automatically when a room ID is detected. In the lobby, or if no room link is detected, enter a Kour.io room link that includes its room ID before submitting. You can edit the link in the report form.
 
 > [!WARNING]
 > Submit only legitimate reports. Do not repeatedly report players to harass them, submit false information, or attempt to bypass Turnstile or the service's controls.

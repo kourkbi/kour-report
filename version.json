@@ -1,4 +1,4 @@
 {
-  "version": "1.0.3",
-  "details": "Aligned report response handling with the API reference."
+  "version": "1.0.4",
+  "details": "Added manual reporting and improved player detection. Manual reports remain available if detection fails. Removed the room ID, reported player name, and reporter name length limits in the script. The report reason and additional details remain limited to 250 characters combined. Improved code comments and section headings to make the script easier to understand. Added an in-game update notification and a badge on the Report button when an update is available. The update menu offers Greasy Fork and GitHub."
 }

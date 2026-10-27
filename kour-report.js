@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      1.0.3
+// @version      1.0.4
 // @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/R9wuHc6ucg
 // @author       kourkbi
 // @license      MIT
@@ -23,6 +23,9 @@
 
     const PLAYER_AVATAR = "https://raw.githubusercontent.com/kourkbi/kour-report/main/assets/menu/player-avatar.jpg";
 
+    /***************************************
+     * Match Detection
+     ***************************************/
     /**
      * Packet prefixes used to recognize match and player events.
      * Keep these signatures in sync with the decoder and packet handler below.
@@ -312,18 +315,48 @@
     }
 
     /**
+     * Read a WebSocket Blob using the modern API, with FileReader for older browsers.
+     * @param {Blob} blob WebSocket message payload.
+     * @returns {Promise<ArrayBuffer>} The binary message contents.
+     */
+    function readReportMatchBlob(blob) {
+        if (typeof blob.arrayBuffer === "function") {
+            return Promise.resolve(blob.arrayBuffer());
+        }
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.addEventListener("load", () => {
+                if (reader.result instanceof ArrayBuffer) {
+                    resolve(reader.result);
+                } else {
+                    reject(new Error("The browser did not return binary player data."));
+                }
+            }, { once: true });
+            reader.addEventListener("error", () => {
+                reject(reader.error || new Error("Unable to read match player data."));
+            }, { once: true });
+            reader.addEventListener("abort", () => {
+                reject(new Error("Reading match player data was aborted."));
+            }, { once: true });
+            reader.readAsArrayBuffer(blob);
+        });
+    }
+
+    /**
      * Apply recognized match events to the current roster and notify the UI.
-     * @param {ArrayBuffer|ArrayBufferView} data WebSocket message data.
+     * @param {Blob|ArrayBuffer|ArrayBufferView} data WebSocket message data.
      * @see REPORT_MATCH_SIGNATURES
      * @see decodeReportMatchPacket
      * @see notifyReportMatchPlayers
      */
-    function observeReportMatchPacket(data) {
+    async function observeReportMatchPacket(data) {
         if (Object.prototype.toString.call(data) === "[object Blob]") {
-            data.arrayBuffer().then(observeReportMatchPacket).catch((error) => {
+            try {
+                data = await readReportMatchBlob(data);
+            } catch (error) {
                 console.warn("[Kour Report] Unable to read match player data.", error);
-            });
-            return;
+                return;
+            }
         }
         if (ArrayBuffer.isView(data)) {
             data = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -356,9 +389,6 @@
                 if (roster instanceof Map) {
                     roster.forEach((stats, id) => rememberReportMatchPlayer(id, stats));
                 }
-                if (reportMatchState.localId !== null && !reportMatchState.localName) {
-                    reportMatchState.localName = `Guest_${reportMatchState.localId}`;
-                }
             } else if (type === "selfJoin") {
                 reportMatchState.active = true;
                 reportMatchState.localId = getReportMatchPlayerId(fields.get(0xfe)) ?? null;
@@ -372,9 +402,6 @@
                         reportMatchState.localName = localPlayer.name;
                     }
                     reportMatchState.players.delete(String(reportMatchState.localId));
-                    if (!reportMatchState.localName) {
-                        reportMatchState.localName = `Guest_${reportMatchState.localId}`;
-                    }
                 }
             } else if (type === "leave") {
                 const id = getReportMatchPlayerId(fields.get(0xfe));
@@ -412,15 +439,22 @@
 
         const TrackedWebSocket = function (...args) {
             const socket = new OriginalWebSocket(...args);
-            if (String(args[0] || "").includes("exitgames")) {
+            if (String(args[0] || "").toLowerCase().includes("exitgames")) {
+                let messageQueue = Promise.resolve();
                 socket.addEventListener("open", () => {
                     activeReportMatchSocket = socket;
                 });
-                socket.addEventListener("message", (event) => observeReportMatchPacket(event.data));
+                socket.addEventListener("message", (event) => {
+                    messageQueue = messageQueue
+                        .then(() => observeReportMatchPacket(event.data))
+                        .catch((error) => {
+                            console.warn("[Kour Report] Unable to process match player data.", error);
+                        });
+                });
                 socket.addEventListener("close", () => {
                     if (activeReportMatchSocket !== socket) return;
                     activeReportMatchSocket = null;
-                    resetReportMatchPlayers();
+                    messageQueue = messageQueue.then(resetReportMatchPlayers);
                 });
             }
             return socket;
@@ -448,32 +482,33 @@
      * @see sendReport
      */
     function initialize() {
-    // Shared sizing and press values keep the panel and launcher visually consistent.
+    /***************************************
+     * Configuration
+     ***************************************/
     const SCRIPT_VERSION = typeof GM_info !== "undefined" &&
         GM_info.script.version && GM_info.script.version !== "dev"
         ? GM_info.script.version
-        : "1.0.0";
+        : "1.0.4";
     const GITHUB_REPOSITORY_URL = "https://github.com/kourkbi/kour-report";
-    const USERSCRIPT_INSTALL_URL = "https://raw.githubusercontent.com/kourkbi/kour-report/main/kour-report.js";
+    const GITHUB_SCRIPT_FILE_URL = "https://github.com/kourkbi/kour-report/blob/main/kour-report.js";
+    const GREASYFORK_SCRIPT_URL = "https://greasyfork.org/scripts/602206-kour-report";
     // Keep version.json synchronized with @version when publishing.
     const VERSION_URL = "https://raw.githubusercontent.com/kourkbi/kour-report/main/version.json";
     const WINDOW_SIZE_SCALE = 1.08;
-    const MAX_REPORT_TARGET_LENGTH = 100;
-    const MAX_REPORTER_NAME_LENGTH = 100;
     const MAX_REPORT_REASON_LENGTH = 250;
     const MAX_SERVER_RESPONSE_LENGTH = 1200;
     const UI_COLORS = Object.freeze({
         white: "#fff",
         ink: "#111",
     });
-    let reportDetailsFocused = false;
-    const shieldReportDetailsKeys = (event) => {
-        if (reportDetailsFocused && event.key !== "Escape") {
+    let reportTextFieldFocused = false;
+    const shieldReportTextFieldKeys = (event) => {
+        if (reportTextFieldFocused && event.key !== "Escape") {
             event.stopImmediatePropagation();
         }
     };
     ["keydown", "keyup", "keypress"].forEach((eventType) => {
-        window.addEventListener(eventType, shieldReportDetailsKeys, true);
+        window.addEventListener(eventType, shieldReportTextFieldKeys, true);
     });
     const BUTTON_PRESS = Object.freeze({
         scale: 0.93,
@@ -483,6 +518,10 @@
     });
     const POPUP_EXIT_DURATION_MS = 150;
     if (document.getElementById("kour-report-ui")) return;
+
+    /***************************************
+     * User Interface and Styles
+     ***************************************/
     const host = document.createElement("div");
     host.id = "kour-report-ui";
     host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
@@ -543,6 +582,16 @@
                 --overlay-padding: 18px;
                 --shadow-dialog: 0 12px 32px #0009;
                 --shadow-dialog-strong: 0 12px 32px var(--color-deep-shadow);
+                --tooltip-width: min(300px, calc(100vw - 24px));
+                --tooltip-padding: 11px 13px;
+                --tooltip-border: 1px solid #45484e;
+                --tooltip-radius: var(--radius-control);
+                --tooltip-color: #f1f1f2;
+                --tooltip-background: var(--color-dialog);
+                --tooltip-shadow: 0 8px 22px var(--color-deep-shadow);
+                --tooltip-font: 750 13px/1.45 var(--font-decorative);
+                --tooltip-text-shadow: 0 1px 2px var(--color-shadow);
+                --tooltip-animation: settings-tooltip-enter var(--duration-control) ease-out both;
                 --scrollbar-thumb: rgba(190, 190, 190, 0.52);
                 --shadow-control-highlight: inset 0 1px 0 #ffffff30;
                 --shadow-control-pressed: inset 0 1px 0 var(--color-white);
@@ -584,6 +633,7 @@
             .title-group { display: flex; align-items: center; gap: 9px; }
             .eyebrow { color: var(--color-text-heading); font-size: 19px; font-weight: 800; }
             .top-actions { color: #aaa; font-size: 12px; font-weight: 700; }
+            .top-actions[hidden] { display: none; }
             .top-action-button {
                 display: inline-flex; min-height: 30px; align-items: center; justify-content: center; gap: 5px;
                 padding: 0 9px; border: 0; border-radius: var(--radius-control); color: var(--color-text-primary);
@@ -618,10 +668,13 @@
                 overflow-wrap: anywhere; text-align: center;
             }
             .menu-update-details {
-                display: -webkit-box; height: 2.6em; max-height: 2.6em; overflow: hidden; color: var(--color-text-muted);
+                display: -webkit-box; width: 100%; height: 2.6em; max-height: 2.6em; overflow: hidden;
+                padding: 0; border: 0; color: var(--color-text-muted); background: transparent; cursor: help;
+                font-family: inherit; text-align: center;
                 font-size: 11px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere;
                 white-space: pre-line; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
             }
+            .menu-update-details[hidden] { display: none; }
             .menu-update .update-button { min-height: 26px; flex: 0 0 auto; background: #53662f; }
             @keyframes update-notice-enter {
                 from { opacity: 0; transform: translateY(4px); }
@@ -635,8 +688,11 @@
                 letter-spacing: -0.1px; text-align: center; text-shadow: 0 1px 1px var(--color-shadow);
             }
             .menu-footer-version {
-                align-self: flex-end; margin: -5px 2px 0; color: #66666a;
-                font: 600 9px/1 Arial, sans-serif;
+                display: flex; width: 100%; align-self: stretch; align-items: center; justify-content: center; gap: 5px;
+                margin: -5px 0 0; color: #858589; font: 600 10px/1 Arial, sans-serif; text-align: center;
+            }
+            .menu-footer-version-separator {
+                color: #626267; font-size: 13px;
             }
             .close {
                 position: relative; z-index: 0;
@@ -654,6 +710,7 @@
                 margin: 0 0 10px; color: #d7d7d9; font-size: 13px; font-weight: 800;
                 text-align: center; text-transform: uppercase;
             }
+            .players-heading[hidden] { display: none; }
             .player-list {
                 display: flex; flex-direction: column; gap: 5px; overflow-x: hidden; overflow-y: auto;
                 scrollbar-color: var(--scrollbar-thumb) transparent; scrollbar-width: thin;
@@ -704,10 +761,20 @@
             }
             .player-action:disabled { opacity: .45; cursor: not-allowed; }
             .empty-state {
+                display: flex; flex-direction: column; align-items: center; gap: 12px;
                 margin: 12px 0; padding: 17px 14px; border: 1px solid #343438; border-radius: var(--radius-card);
                 color: var(--color-text-description); background: #202023; font: 700 14px/1.45 var(--font-decorative);
                 letter-spacing: -0.1px; text-align: center; text-shadow: 0 1px 1px var(--color-shadow);
             }
+            .empty-state[hidden] { display: none; }
+            .manual-report-row {
+                display: flex; justify-content: center; margin: 12px 0;
+            }
+            .manual-report-row[hidden] { display: none; }
+            .manual-report-button {
+                min-width: 150px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+            }
+            .manual-report-button svg { width: 17px; height: 17px; flex: 0 0 17px; fill: currentColor; }
             .popup-layer {
                 position: fixed; inset: 0; z-index: 3; display: grid; place-items: center;
                 padding: var(--overlay-padding); background: var(--color-overlay-dim); pointer-events: auto;
@@ -716,7 +783,8 @@
             .popup-layer:not(.is-closing) > .info-dialog,
             .popup-layer:not(.is-closing) > .settings-dialog,
             .popup-layer:not(.is-closing) > .report-dialog,
-            .popup-layer:not(.is-closing) > .verification-dialog {
+            .popup-layer:not(.is-closing) > .verification-dialog,
+            .popup-layer:not(.is-closing) > .update-method-dialog {
                 animation: var(--animation-popup-enter);
             }
             .popup-layer.is-closing {
@@ -725,7 +793,8 @@
             .popup-layer.is-closing > .info-dialog,
             .popup-layer.is-closing > .settings-dialog,
             .popup-layer.is-closing > .report-dialog,
-            .popup-layer.is-closing > .verification-dialog {
+            .popup-layer.is-closing > .verification-dialog,
+            .popup-layer.is-closing > .update-method-dialog {
                 animation: popup-dialog-exit var(--duration-exit) ease-in both;
             }
             @keyframes popup-backdrop-exit {
@@ -743,6 +812,57 @@
                 to { opacity: 1; transform: translateY(0); }
             }
             .info-dialog-layer[hidden] { display: none; }
+            .update-method-layer { z-index: 6; }
+            .update-method-layer[hidden] { display: none; }
+            .update-method-dialog {
+                display: flex; width: min(440px, 100%); max-height: calc(100vh - 36px);
+                flex-direction: column; overflow: hidden; border: 1px solid var(--color-border-dialog);
+                border-radius: var(--radius-dialog); color: var(--color-text-primary);
+                background: var(--color-menu); box-shadow: var(--shadow-dialog-strong);
+            }
+            .update-method-header {
+                display: flex; min-height: 58px; align-items: center; gap: 11px;
+                padding: 9px 14px; background: var(--color-menu-header);
+            }
+            .update-method-close {
+                width: 32px; height: 32px; flex: 0 0 32px; border: 0;
+                border-radius: var(--radius-control); color: var(--color-white);
+                background: var(--color-close); cursor: pointer; font-size: 22px; font-weight: 800;
+            }
+            .update-method-title { margin: 0; color: var(--color-text-heading); font-size: 19px; font-weight: 850; }
+            .update-method-content {
+                display: flex; max-height: min(560px, calc(100vh - 112px)); flex-direction: column;
+                gap: 11px; overflow-y: auto; padding: 16px;
+                scrollbar-color: var(--scrollbar-thumb) transparent; scrollbar-width: thin;
+            }
+            .update-method-description {
+                margin: 0 0 2px; color: var(--color-text-description); font-size: 13px;
+                font-weight: 600; line-height: 1.45;
+            }
+            .update-method-option {
+                display: flex; width: 100%; min-width: 0; align-items: center; gap: 12px;
+                padding: 12px; border: 1px solid var(--color-border-dialog); border-radius: var(--radius-card);
+                color: var(--color-text-primary); background: #222226; cursor: pointer; text-align: left;
+                text-decoration: none; transition: border-color var(--duration-control), background-color var(--duration-control);
+            }
+            .update-method-option:hover { border-color: #72727a; background: #29292e; }
+            .update-method-option:focus-visible { outline: 2px solid #d6d6d6; outline-offset: 2px; }
+            .update-method-option.recommended { border-color: #667a3c; background: #25291f; }
+            .update-method-option.recommended:hover { border-color: #91a75e; background: #2b3022; }
+            .update-method-icon {
+                display: grid; width: 42px; height: 42px; flex: 0 0 42px;
+                place-items: center; overflow: hidden; border-radius: 50%; background: #f1f1f1;
+            }
+            .update-method-icon img { display: block; width: 27px; height: 27px; object-fit: contain; }
+            .update-method-icon.github { color: #fff; background: #24292f; }
+            .update-method-icon.github svg { width: 25px; height: 25px; fill: currentColor; }
+            .update-method-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+            .update-method-option-title { display: flex; align-items: center; gap: 7px; color: var(--color-text-bright); font-size: 14px; font-weight: 800; }
+            .update-method-badge {
+                padding: 2px 5px; border-radius: 3px; color: #f0f5df; background: #53662f;
+                font: 800 9px/1.2 var(--font-decorative); letter-spacing: .3px; text-transform: uppercase;
+            }
+            .update-method-option-description { color: var(--color-text-muted); font: 600 12px/1.4 var(--font-ui); }
             .settings-layer {
                 position: fixed; inset: 0; z-index: 5; display: grid; place-items: center;
                 padding: var(--overlay-padding); background: var(--color-overlay-dim); pointer-events: auto;
@@ -773,17 +893,15 @@
             .settings-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
             .settings-label { color: var(--color-text-bright); font-size: 14px; font-weight: 800; }
             .settings-default { color: #77777b; font-size: 10px; font-weight: 700; }
-            .settings-warning-tooltip {
-                position: fixed; z-index: 10; width: min(300px, calc(100vw - 24px));
-                padding: 11px 13px; border: 1px solid #45484e; border-radius: var(--radius-control);
-                color: #f1f1f2; background: var(--color-dialog);
-                box-shadow: 0 8px 22px var(--color-deep-shadow);
-                font: 750 13px/1.45 var(--font-decorative);
-                text-shadow: 0 1px 2px var(--color-shadow); white-space: pre-line;
+            .tooltip {
+                position: fixed; z-index: 10; width: var(--tooltip-width);
+                padding: var(--tooltip-padding); border: var(--tooltip-border); border-radius: var(--tooltip-radius);
+                color: var(--tooltip-color); background: var(--tooltip-background); box-shadow: var(--tooltip-shadow);
+                font: var(--tooltip-font); text-shadow: var(--tooltip-text-shadow); white-space: pre-line;
                 pointer-events: none; overflow-wrap: anywhere;
-                animation: settings-tooltip-enter var(--duration-control) ease-out both;
+                animation: var(--tooltip-animation);
             }
-            .settings-warning-tooltip[hidden] { display: none; }
+            .tooltip[hidden] { display: none; }
             @keyframes settings-tooltip-enter {
                 from { opacity: 0; transform: translateY(3px); }
                 to { opacity: 1; transform: translateY(0); }
@@ -950,6 +1068,16 @@
             .report-form { display: flex; flex-direction: column; gap: 12px; }
             .report-field { display: flex; flex-direction: column; gap: 5px; }
             .report-field label { color: var(--color-text-subtle); font-size: 12px; font-weight: 750; }
+            .report-target-label-row { display: flex; align-items: center; gap: 6px; }
+            .report-target-help {
+                display: grid; width: 17px; height: 17px; place-items: center; padding: 0;
+                border: 1px solid #77777d; border-radius: 50%; color: var(--color-text-secondary);
+                background: transparent; cursor: help; font: 800 11px/1 Arial, sans-serif;
+            }
+            .report-target-help[hidden] { display: none; }
+            .report-target-help:hover, .report-target-help:focus-visible {
+                border-color: var(--color-white); color: var(--color-white);
+            }
             .report-field input, .report-field select, .report-field textarea {
                 width: 100%; border: 1px solid #38383c; border-radius: var(--radius-medium); outline: none;
                 padding: 11px 13px; color: var(--color-text-primary); background: #222225;
@@ -1028,12 +1156,12 @@
                     filter var(--button-press-duration) ease;
             }
             @media (prefers-reduced-motion: reduce) {
-                .info-dialog, .settings-dialog, .report-dialog, .verification-layer, .verification-dialog, .reason-options,
+                .info-dialog, .settings-dialog, .report-dialog, .verification-layer, .verification-dialog, .update-method-dialog, .reason-options,
                 .popup-layer.is-closing, .popup-layer.is-closing > .info-dialog, .popup-layer.is-closing > .settings-dialog,
-                .popup-layer.is-closing > .report-dialog, .popup-layer.is-closing > .verification-dialog,
+                .popup-layer.is-closing > .report-dialog, .popup-layer.is-closing > .verification-dialog, .popup-layer.is-closing > .update-method-dialog,
                 .popup-layer:not(.is-closing), .popup-layer:not(.is-closing) > .info-dialog,
                 .popup-layer:not(.is-closing) > .settings-dialog, .popup-layer:not(.is-closing) > .report-dialog,
-                .popup-layer:not(.is-closing) > .verification-dialog,
+                .popup-layer:not(.is-closing) > .verification-dialog, .popup-layer:not(.is-closing) > .update-method-dialog,
                 .panel.open, .panel.open .main, .panel.is-closing, .panel.is-closing .main { animation: none; }
                 .button-pressable, .reason-control { transition: none; }
             }
@@ -1087,13 +1215,20 @@
         <section class="panel" role="dialog" aria-label="Kour Report" aria-hidden="true">
             <div class="main">
                 <header class="topbar">
-                    <div class="title-group"><button class="close" type="button" aria-label="Close menu">×</button><span class="eyebrow">PLAYERS IN THIS ROOM</span></div>
-                    <div class="top-actions" data-player-count>0 PLAYERS</div>
+                    <div class="title-group"><button class="close" type="button" aria-label="Close menu">×</button><span class="eyebrow">REPORTS</span></div>
+                    <div class="top-actions" data-player-count hidden></div>
                 </header>
                 <main class="content">
-                    <h2 class="players-heading">Players</h2>
+                    <h2 class="players-heading" hidden>Players</h2>
                     <div class="player-list" aria-live="polite"></div>
-                    <div class="empty-state">Join a match to see players available to report.</div>
+                    <div class="empty-state">
+                        <span class="empty-state-message">Join a match to see players available to report.</span>
+                        <button class="report-dialog-button submit manual-report-button" type="button">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h12.1a6.5 6.5 0 0 1-.1-1 6.5 6.5 0 0 1 2.05-4.74A13.2 13.2 0 0 0 12 14Zm6 0v3h-3v2h3v3h2v-3h3v-2h-3v-3h-2Z"/></svg>
+                            <span>Report manually</span>
+                        </button>
+                    </div>
+                    <div class="manual-report-row" hidden></div>
                     <footer class="menu-footer">
                         <div class="menu-footer-actions">
                             <button class="top-action-button discord-button" type="button" aria-label="Discord">
@@ -1115,14 +1250,47 @@
                         <div class="menu-update" data-update-notice role="status" aria-live="polite" hidden>
                             <span class="menu-update-copy">
                                 <span data-update-label></span>
-                                <span class="menu-update-details" data-update-details></span>
+                                <button class="menu-update-details" data-update-details type="button" hidden></button>
                             </span>
                             <button class="top-action-button update-button" type="button">Update</button>
                         </div>
                         <p class="menu-footer-note">Reports are reviewed in real time.</p>
-                        <span class="menu-footer-version">v${SCRIPT_VERSION}</span>
+                        <span class="menu-footer-version">
+                            <span>Kour Report</span>
+                            <span class="menu-footer-version-separator" aria-hidden="true">·</span>
+                            <span>v${SCRIPT_VERSION}</span>
+                        </span>
                     </footer>
                 </main>
+            </div>
+            <div class="update-method-layer popup-layer" hidden>
+                <section class="update-method-dialog" role="dialog" aria-modal="true" aria-labelledby="update-method-title">
+                    <header class="update-method-header">
+                        <button class="update-method-close" type="button" aria-label="Close update options">×</button>
+                        <h2 class="update-method-title" id="update-method-title">Choose an update method</h2>
+                    </header>
+                    <div class="update-method-content">
+                        <p class="update-method-description">Choose how you want to get the latest version of Kour Report.</p>
+                        <a class="update-method-option recommended" href="${GREASYFORK_SCRIPT_URL}" target="_blank" rel="noopener noreferrer">
+                            <span class="update-method-icon" aria-hidden="true">
+                                <img src="https://raw.githubusercontent.com/denilsonsa/denilsonsa.github.io/master/icons/GreasyFork.svg" alt="">
+                            </span>
+                            <span class="update-method-copy">
+                                <span class="update-method-option-title">Greasy Fork <span class="update-method-badge">Recommended</span></span>
+                                <span class="update-method-option-description">Open the script page and press <strong>Update</strong> to install the latest version.</span>
+                            </span>
+                        </a>
+                        <a class="update-method-option" href="${GITHUB_SCRIPT_FILE_URL}" target="_blank" rel="noopener noreferrer">
+                            <span class="update-method-icon github" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.56.1.76-.24.76-.54v-2.08c-3.1.67-3.75-1.32-3.75-1.32-.51-1.29-1.24-1.63-1.24-1.63-1.01-.69.08-.68.08-.68 1.12.08 1.71 1.15 1.71 1.15 1 .1.98 2.2 3.34 1.57.1-.72.39-1.21.71-1.49-2.48-.28-5.09-1.24-5.09-5.52 0-1.22.44-2.22 1.15-3-.12-.28-.5-1.42.11-2.96 0 0 .94-.3 3.05 1.15a10.6 10.6 0 0 1 5.55 0c2.12-1.44 3.05-1.15 3.05-1.15.61 1.54.23 2.68.11 2.96.72.78 1.15 1.78 1.15 3 0 4.29-2.61 5.23-5.1 5.51.4.35.76 1.02.76 2.06v3.06c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z"/></svg>
+                            </span>
+                            <span class="update-method-copy">
+                                <span class="update-method-option-title">GitHub</span>
+                                <span class="update-method-option-description">Open the script file, copy its code, then paste it into Tampermonkey or your userscript manager.</span>
+                            </span>
+                        </a>
+                    </div>
+                </section>
             </div>
             <div class="info-dialog-layer popup-layer" hidden>
                 <section class="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-dialog-title">
@@ -1227,7 +1395,7 @@
                         <button class="settings-reset" type="button">RESET DEFAULT</button>
                     </div>
                 </section>
-                <div class="settings-warning-tooltip" data-hide-icon-warning role="tooltip" hidden></div>
+                <div class="tooltip settings-warning-tooltip" data-hide-icon-warning role="tooltip" hidden></div>
             </div>
             <div class="report-dialog-layer popup-layer" hidden>
                 <section class="report-dialog" role="dialog" aria-modal="true" aria-labelledby="report-dialog-title">
@@ -1240,8 +1408,15 @@
                     </header>
                     <form class="report-form">
                         <div class="report-field">
-                            <label for="report-target">Reported player</label>
-                            <input id="report-target" name="target" type="text" readonly>
+                            <div class="report-target-label-row">
+                                <label for="report-target">Reported player</label>
+                                <button class="report-target-help" type="button" aria-label="Help for reported player name" aria-describedby="manual-report-help-tooltip">?</button>
+                            </div>
+                            <input id="report-target" name="target" type="text" required readonly>
+                        </div>
+                        <div class="report-field">
+                            <label for="report-session-link">Room link</label>
+                            <input id="report-session-link" name="sessionLink" type="text" placeholder="https://kour.io/#ABC123" autocomplete="url" required>
                         </div>
                         <div class="report-field">
                             <div class="reason-control">
@@ -1262,7 +1437,7 @@
                         </div>
                         <div class="report-field">
                             <label for="report-details">Additional detail (optional)</label>
-                            <textarea id="report-details" maxlength="250" aria-describedby="report-details-count" placeholder="Optional: add details or evidence."></textarea>
+                            <textarea id="report-details" aria-describedby="report-details-count" placeholder="Optional: add details or evidence."></textarea>
                             <span class="report-character-count" id="report-details-count">250 characters remaining</span>
                         </div>
                         <input id="report-combined-reason" name="reason" type="hidden">
@@ -1273,6 +1448,7 @@
                         </div>
                     </form>
                 </section>
+                <div class="tooltip manual-report-help-tooltip" id="manual-report-help-tooltip" role="tooltip" hidden>If you don't know the player's full name or it's difficult to spell, leave this field empty or enter only the part you know.</div>
             </div>
             <div class="verification-layer popup-layer" hidden>
                 <section class="verification-dialog" role="dialog" aria-modal="true" aria-labelledby="verification-title">
@@ -1456,12 +1632,33 @@
         textShadow: "0 1px 1px rgba(0,0,0,0.65)",
         pointerEvents: "none",
     });
+    const updateBadge = document.createElement("span");
+    updateBadge.textContent = "!";
+    updateBadge.setAttribute("aria-hidden", "true");
+    Object.assign(updateBadge.style, {
+        position: "absolute",
+        top: "-5px",
+        left: "-5px",
+        display: "none",
+        width: "20px",
+        height: "20px",
+        placeItems: "center",
+        boxSizing: "border-box",
+        borderRadius: "50%",
+        color: "#fff",
+        background: "#f01444",
+        font: "800 13px/1 Arial, sans-serif",
+        pointerEvents: "none",
+    });
     launcher.appendChild(launcherIcon);
     launcher.appendChild(launcherLabel);
+    launcher.appendChild(updateBadge);
     document.body.appendChild(host);
     document.body.appendChild(launcher);
 
-    // Cache template elements once; the handlers below reuse these references.
+    /***************************************
+     * UI References and State
+     ***************************************/
     const panel = shadow.querySelector(".panel");
     const closeButton = shadow.querySelector(".close");
     const discordButton = shadow.querySelector(".discord-button");
@@ -1472,6 +1669,9 @@
     const updateLabel = shadow.querySelector("[data-update-label]");
     const updateDetails = shadow.querySelector("[data-update-details]");
     const updateButton = shadow.querySelector(".update-button");
+    const updateMethodLayer = shadow.querySelector(".update-method-layer");
+    const updateMethodCloseButton = shadow.querySelector(".update-method-close");
+    const updateMethodOptions = [...shadow.querySelectorAll(".update-method-option")];
     const infoDialogLayer = shadow.querySelector(".info-dialog-layer");
     const infoDialogCloseButton = shadow.querySelector(".info-dialog-close");
     const settingsLayer = shadow.querySelector(".settings-layer");
@@ -1494,11 +1694,18 @@
         avatar.src = PLAYER_AVATAR;
     });
     const playerList = shadow.querySelector(".player-list");
+    const playersHeading = shadow.querySelector(".players-heading");
     const playerCount = shadow.querySelector("[data-player-count]");
     const emptyState = shadow.querySelector(".empty-state");
+    const emptyStateMessage = shadow.querySelector(".empty-state-message");
+    const manualReportRow = shadow.querySelector(".manual-report-row");
+    const manualReportButton = shadow.querySelector(".manual-report-button");
     const reportDialogLayer = shadow.querySelector(".report-dialog-layer");
     const reportForm = shadow.querySelector(".report-form");
     const reportTarget = shadow.querySelector("#report-target");
+    const reportTargetHelp = shadow.querySelector(".report-target-help");
+    const manualReportHelpTooltip = shadow.querySelector("#manual-report-help-tooltip");
+    const reportSessionLink = shadow.querySelector("#report-session-link");
     const reportDialogTitle = shadow.querySelector("#report-dialog-title");
     const reportReason = shadow.querySelector("#report-reason");
     const reportReasonLabel = shadow.querySelector(".reason-trigger-label");
@@ -1521,11 +1728,17 @@
     let captchaInProgress = false;
     let pendingReportPayload = null;
     let reportedPlayerKey = null;
+    let manualReport = false;
+    let reportSessionLinkEdited = false;
     let reportSubmitting = false;
     let renderedPlayersSignature = null;
     const exitTimers = new WeakMap();
     let heldPressButton = null;
     let heldPressControl = null;
+
+    /***************************************
+     * Launcher Settings and Dialog Helpers
+     ***************************************/
     /**
      * Launcher preferences are validated when loaded, then applied to the launcher.
      * Keep the defaults, saved-value checks, and settings controls aligned.
@@ -1697,6 +1910,27 @@
         settingsHideIconWarning.style.top = `${Math.min(maxTop, Math.max(margin, top))}px`;
     }
 
+    function positionManualReportHelpTooltip() {
+        const margin = 12;
+        const offset = 0;
+        const anchor = reportTargetHelp.getBoundingClientRect();
+        const bounds = manualReportHelpTooltip.getBoundingClientRect();
+        const left = Math.min(
+            window.innerWidth - bounds.width - margin,
+            Math.max(margin, anchor.left + anchor.width / 2 - bounds.width / 2)
+        );
+        const top = anchor.bottom + bounds.height + offset <= window.innerHeight - margin
+            ? anchor.bottom + offset
+            : Math.max(margin, anchor.top - bounds.height - offset);
+        manualReportHelpTooltip.style.left = `${left}px`;
+        manualReportHelpTooltip.style.top = `${top}px`;
+    }
+
+    function showManualReportHelpTooltip() {
+        manualReportHelpTooltip.hidden = false;
+        positionManualReportHelpTooltip();
+    }
+
     /**
      * Show the settings warning near the pointer or focused settings row.
      * @see positionSettingsTooltip
@@ -1754,6 +1988,9 @@
     }
     applyLauncherSettings();
 
+    /***************************************
+     * Launcher Controls and Interactions
+     ***************************************/
     const releaseHeldPress = () => {
         heldPressButton?.classList.remove("button-press-held");
         heldPressControl?.classList.remove("is-pressed");
@@ -1763,7 +2000,7 @@
     document.addEventListener("pointerup", releaseHeldPress);
     document.addEventListener("pointercancel", releaseHeldPress);
     addButtonPressAnimation(closeButton);
-    [discordButton, githubButton, infoButton, settingsButton, updateButton].forEach((button) => {
+    [discordButton, githubButton, infoButton, settingsButton, updateButton, updateMethodCloseButton, ...updateMethodOptions].forEach((button) => {
         addButtonPressAnimation(button);
     });
     discordButton.title = "Official Discord for KBI (Kour Bureau of Investigations)";
@@ -1775,7 +2012,23 @@
         window.open(GITHUB_REPOSITORY_URL, "_blank", "noopener,noreferrer");
     });
     updateButton.addEventListener("click", () => {
-        window.open(USERSCRIPT_INSTALL_URL, "_blank", "noopener,noreferrer");
+        showPopup(updateMethodLayer);
+        updateMethodOptions[0].focus();
+    });
+    updateMethodCloseButton.addEventListener("click", () => {
+        hidePopup(updateMethodLayer);
+        updateButton.focus();
+    });
+    updateMethodLayer.addEventListener("click", (event) => {
+        if (event.target !== updateMethodLayer) return;
+        hidePopup(updateMethodLayer);
+        updateButton.focus();
+    });
+    updateMethodOptions.forEach((option) => {
+        option.addEventListener("click", () => {
+            hidePopup(updateMethodLayer);
+            updateButton.focus();
+        });
     });
     infoButton.addEventListener("click", () => {
         showPopup(infoDialogLayer);
@@ -1928,11 +2181,15 @@
         capturingKeySetting = null;
     });
 
+    /***************************************
+     * Report Form and Verification
+     ***************************************/
     // Report and verification controls share the same pointer/keyboard press effect.
     const cancelReportButton = shadow.querySelector(".cancel-report");
     const submitReportButton = shadow.querySelector(".report-dialog-button.submit");
     addButtonPressAnimation(cancelReportButton);
     addButtonPressAnimation(submitReportButton);
+    addButtonPressAnimation(manualReportButton);
     addButtonPressAnimation(verificationCancelButton);
     addButtonPressAnimation(reportReason, shadow.querySelector(".reason-control"));
     reportReasonButtons.forEach((option) => addButtonPressAnimation(option));
@@ -1964,14 +2221,17 @@
     function closeReportDialog() {
         if (reportSubmitting) return;
         resetReportCaptcha();
-        reportDetailsFocused = false;
+        reportTextFieldFocused = false;
+        manualReportHelpTooltip.hidden = true;
         hidePopup(reportDialogLayer);
         setReasonMenuOpen(false);
         reportForm.reset();
+        reportTarget.readOnly = true;
         reportFormStatus.hidden = true;
         reportFormStatus.removeAttribute("data-kind");
         selectedReportReason = "";
         reportedPlayerKey = null;
+        manualReport = false;
     }
 
     /**
@@ -2126,9 +2386,12 @@
         }
     }
 
+    /***************************************
+     * Reporter Identity, Room Links, and Updates
+     ***************************************/
     /**
-     * Resolve the reporter name from available game/browser sources and read the room ID.
-     * @returns {{reporter: string, roomId: string}} Values required by the report API.
+     * Prepare the reporter identity for a report.
+     * @returns {{reporter: string}} Reporter identity for the report request.
      * @see reportForm
      * @see openVerificationDialog
      */
@@ -2147,7 +2410,10 @@
         } catch (error) {
             console.warn("[Kour Report] Could not read the saved player nickname:", error);
         }
-        if (!reporter) reporter = normalizeReporter(reportMatchState.localName);
+        if (!reporter) {
+            const matchName = normalizeReporter(reportMatchState.localName);
+            if (matchName) reporter = matchName;
+        }
         if (!reporter) {
             try {
                 const gameWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
@@ -2163,8 +2429,48 @@
                 document.getElementById("adminCurrentNickname")?.textContent
             );
         }
-        const roomId = window.location.hash.slice(1).trim().toUpperCase();
-        return { reporter, roomId };
+        if (!reporter && reportMatchState.localId !== null &&
+            String(reportMatchState.localId).trim()) {
+            reporter = `Guest_${reportMatchState.localId}`;
+        }
+        return { reporter };
+    }
+
+    /**
+     * Extract a non-empty room ID from a user-provided Kour match URL.
+     * @param {string} value Link entered in the report form.
+     * @returns {{url: URL, roomId: string}|null} Parsed room link, or null when invalid.
+     */
+    function parseReportSessionLink(value) {
+        let sessionUrl;
+        try {
+            sessionUrl = new URL(value.trim());
+        } catch {
+            return null;
+        }
+        const isKourHost = sessionUrl.hostname === "kour.io" ||
+            sessionUrl.hostname.endsWith(".kour.io");
+        const roomId = sessionUrl.hash.slice(1).trim();
+        if (!isKourHost || !/^https?:$/.test(sessionUrl.protocol) ||
+            sessionUrl.username || sessionUrl.password || !roomId) {
+            return null;
+        }
+        return { url: sessionUrl, roomId };
+    }
+
+    /**
+     * Prefill the report link when the current page has a non-empty room ID.
+     * @returns {string} Current Kour match URL, or an empty string in the lobby.
+     */
+    function getCurrentReportSessionLink() {
+        const roomId = window.location.hash.slice(1).trim();
+        return roomId ? window.location.href : "";
+    }
+
+    function updateOpenManualReportSessionLink() {
+        if (!manualReport || reportDialogLayer.hidden || reportSessionLinkEdited) return;
+        const sessionLink = getCurrentReportSessionLink();
+        if (sessionLink) reportSessionLink.value = sessionLink;
     }
 
     function limitServerResponse(message) {
@@ -2277,28 +2583,53 @@
 
         updateLabel.textContent = `New update available: v${latestVersion}`;
         updateDetails.textContent = updateManifest.details.trim();
-        updateDetails.title = updateDetails.textContent;
         updateDetails.hidden = updateDetails.textContent.length === 0;
+        updateDetails.title = updateDetails.textContent;
         updateNotice.hidden = false;
-        notifyUnityWhenReady(`Kour Report v${latestVersion} is available. Open the report menu to update.`);
+        updateBadge.style.display = "grid";
+        launcher.setAttribute("aria-label", "Open Kour Report menu; new update available");
+        launcher.title = "Open Kour Report - new update available";
+        notifyUnityWhenReady("<color=#4CAF50>New report script update!</color>");
     }
 
+    /***************************************
+     * Report Dialog and Player List
+     ***************************************/
     /**
      * Reset the form and prepare it for the selected player.
-     * @param {object} player Selected roster entry.
+     * @param {object|null} player Selected roster entry, or null for a manual report.
+     * @param {boolean} [isManual=false] Whether the reported name is entered manually.
      * @see updateCombinedReason
      * @see closeReportDialog
      */
-    function openReportDialog(player) {
+    function openReportDialog(player, isManual = false) {
         resetReportCaptcha();
-        reportedPlayerKey = player.key;
+        manualReport = isManual;
+        reportedPlayerKey = isManual ? null : player.key;
         reportDialogTitle.replaceChildren();
-        appendPlayerName(reportDialogTitle, player.rawName || "", player.name);
-        reportDialogTitle.title = player.name;
-        reportTarget.value = player.name.replace(/^\[[^\]]{1,32}\]\s*/, "");
+        if (isManual) {
+            reportDialogTitle.textContent = "Manual report";
+            reportDialogTitle.title = "Manual report";
+        } else {
+            appendPlayerName(reportDialogTitle, player.rawName || "", player.name);
+            reportDialogTitle.title = player.name;
+        }
+        reportDialogLayer.querySelector(".report-dialog-subtitle").textContent = isManual
+            ? "Enter the player's name and report details"
+            : "Confirm the player and report details";
+        reportTarget.readOnly = !isManual;
+        reportTarget.required = !isManual;
+        reportTargetHelp.hidden = !isManual;
+        manualReportHelpTooltip.hidden = true;
+        reportTarget.placeholder = isManual ? "Enter player name" : "";
+        reportTarget.value = isManual
+            ? ""
+            : player.name.replace(/^\[[^\]]{1,32}\]\s*/, "");
         reportTarget.title = reportTarget.value;
+        reportSessionLinkEdited = false;
+        reportSessionLink.value = getCurrentReportSessionLink();
         reportDialogAvatar.src = PLAYER_AVATAR;
-        reportDialogAvatar.alt = `Profile image for ${player.name}`;
+        reportDialogAvatar.alt = isManual ? "Kour Report" : `Profile image for ${player.name}`;
         selectedReportReason = "";
         reportReasonLabel.textContent = "Select a reason";
         setReasonMenuOpen(false);
@@ -2313,7 +2644,8 @@
         reportFormStatus.hidden = true;
         reportFormStatus.removeAttribute("data-kind");
         showPopup(reportDialogLayer);
-        reportReason.focus();
+        if (isManual) reportTarget.focus();
+        else reportReason.focus();
     }
 
     /**
@@ -2338,19 +2670,31 @@
     }
 
     reportDetails.addEventListener("input", updateCombinedReason);
-    reportDetails.addEventListener("focus", () => {
-        reportDetailsFocused = true;
+    [reportTarget, reportSessionLink, reportDetails].forEach((field) => {
+        field.addEventListener("focus", () => {
+            reportTextFieldFocused = true;
+        });
+        field.addEventListener("blur", () => {
+            reportTextFieldFocused = false;
+        });
+        field.addEventListener("pointerdown", () => {
+            if (document.activeElement instanceof HTMLCanvasElement) {
+                document.activeElement.blur();
+            }
+            field.focus();
+        });
     });
-    reportDetails.addEventListener("blur", () => {
-        reportDetailsFocused = false;
+    reportSessionLink.addEventListener("input", () => {
+        reportSessionLinkEdited = true;
     });
-    reportDetails.addEventListener("pointerdown", () => {
-        if (document.activeElement instanceof HTMLCanvasElement) {
-            document.activeElement.blur();
-        }
-        reportDetails.focus();
+    reportTargetHelp.addEventListener("pointerenter", showManualReportHelpTooltip);
+    reportTargetHelp.addEventListener("pointerleave", () => {
+        if (shadow.activeElement !== reportTargetHelp) manualReportHelpTooltip.hidden = true;
     });
-
+    reportTargetHelp.addEventListener("focus", showManualReportHelpTooltip);
+    reportTargetHelp.addEventListener("blur", () => {
+        manualReportHelpTooltip.hidden = true;
+    });
     // Keep the reason dropdown state and selected option synchronized with the form.
     // @see setReasonMenuOpen
     // @see updateCombinedReason
@@ -2434,9 +2778,18 @@
     }
 
     function renderPlayers(active, players) {
+        updateOpenManualReportSessionLink();
+        playerCount.hidden = true;
+        playerCount.textContent = "";
         const reportablePlayers = active
             ? players.filter((player) => !player.local).sort((a, b) => a.name.localeCompare(b.name))
             : [];
+        const hasReportablePlayers = reportablePlayers.length > 0;
+        playersHeading.hidden = !hasReportablePlayers;
+        if (hasReportablePlayers) {
+            playerCount.textContent = `${reportablePlayers.length} ${reportablePlayers.length === 1 ? "PLAYER" : "PLAYERS"}`;
+            playerCount.hidden = false;
+        }
         const signature = JSON.stringify({
             active,
             players: reportablePlayers.map(({ key, name, playerId }) => [key, name, playerId]),
@@ -2446,11 +2799,12 @@
         const existingPlayerKeys = new Set(
             [...playerList.children].map((row) => row.dataset.playerKey)
         );
-        playerCount.textContent = `${reportablePlayers.length} ${reportablePlayers.length === 1 ? "PLAYER" : "PLAYERS"}`;
-        emptyState.hidden = reportablePlayers.length > 0;
-        emptyState.textContent = active
-            ? "There are no other players in this match to report."
-            : "Join a match to see players available to report.";
+        emptyState.hidden = hasReportablePlayers;
+        manualReportRow.hidden = !hasReportablePlayers;
+        (hasReportablePlayers ? manualReportRow : emptyState).appendChild(manualReportButton);
+        emptyStateMessage.textContent = active
+            ? "No players were detected. The room may be empty, or player detection may have failed. We recommend submitting a manual report."
+            : "Join a match to see players available to report, or use Report manually below.";
         playerList.replaceChildren();
         playerList.style.maxHeight = "";
         reportablePlayers.forEach((player) => {
@@ -2494,6 +2848,7 @@
     }
 
     onReportMatchPlayersUpdated = (active, players) => renderPlayers(active, players);
+    window.addEventListener("hashchange", updateOpenManualReportSessionLink);
     notifyReportMatchPlayers();
 
     /**
@@ -2537,6 +2892,7 @@
         if (event.target === panel) setOpen(false);
     });
     closeButton.addEventListener("click", () => setOpen(false));
+    manualReportButton.addEventListener("click", () => openReportDialog(null, true));
     shadow.querySelector(".cancel-report").addEventListener("click", closeReportDialog);
     reportDialogLayer.addEventListener("click", (event) => {
         if (event.target === reportDialogLayer && !reportSubmitting) closeReportDialog();
@@ -2566,40 +2922,38 @@
         }
         if (!reportForm.reportValidity()) return;
         updateCombinedReason();
-        if (!reportMatchState.active ||
+        if (!manualReport && (!reportMatchState.active ||
             ![...reportMatchState.players.values()].some((player) =>
-                String(player.key) === String(reportedPlayerKey))) {
+                String(player.key) === String(reportedPlayerKey)))) {
             setReportFormStatus("The reported player is no longer in the current match. Select a player who is still present.");
             return;
         }
 
-        const { reporter, roomId } = getReportIdentity();
+        const reporter = getReportIdentity().reporter || "Not detected";
         const target = reportTarget.value.trim();
         const reason = reportCombinedReason.value.trim();
-        if (!target || target.length > MAX_REPORT_TARGET_LENGTH) {
-            setReportFormStatus("The reported player name must be between 1 and 100 characters.");
+        const parsedSessionLink = parseReportSessionLink(reportSessionLink.value);
+        if (!manualReport && !target) {
+            setReportFormStatus("Enter the reported player's name.");
             return;
         }
-        if (reporter.length > MAX_REPORTER_NAME_LENGTH) {
-            setReportFormStatus("Your player name cannot exceed 100 characters.");
+        if (!parsedSessionLink) {
+            setReportFormStatus("Enter a Kour room link that includes a room ID, for example https://kour.io/#ABC123.");
             return;
         }
-        if (!roomId || !/^[A-Z0-9]{6}$/.test(roomId)) {
-            setReportFormStatus("The room ID must contain exactly 6 uppercase letters or numbers. Join a valid room and try again.");
-            return;
-        }
-        const sessionUrl = new URL(window.location.href);
-        sessionUrl.hash = roomId;
         pendingReportPayload = {
-            ...(reporter ? { reporter } : {}),
+            reporter,
             target,
             reason,
-            roomId,
-            sessionLink: sessionUrl.href,
+            roomId: parsedSessionLink.roomId,
+            sessionLink: parsedSessionLink.url.href,
         };
         reportFormStatus.hidden = true;
         void openVerificationDialog();
     });
+    /***************************************
+     * Report Submission
+     ***************************************/
     /**
      * Submit a verified report, show the server result, and restore the form state.
      * @param {object} payload Report fields prepared by the submit handler.
@@ -2655,7 +3009,7 @@
                 responseData?.success !== false &&
                 responseData?.message === "Report submitted successfully.";
             if (reportSucceeded) {
-                showUnityReportNotification("Your report was sent successfully.");
+                showUnityReportNotification("<color=#4CAF50>Report sent successfully!</color>");
                 setReportFormStatus(responseData.message, "success");
             } else {
                 const retryAfterSeconds = responseData?.code === "KOUR_REPORT_API_REPORT_COOLDOWN"
@@ -2689,6 +3043,9 @@
      * @returns {boolean} Whether the event originated in a text-entry control.
      * @see document keydown handler
      */
+    /***************************************
+     * Keyboard Shortcuts and Initialization
+     ***************************************/
     function isTextEntry(event) {
         return event.composedPath().some((target) =>
             target instanceof Element &&
@@ -2721,6 +3078,11 @@
         }
         if (event.key === "Escape" && !settingsLayer.hidden) {
             closeSettingsDialog();
+            return;
+        }
+        if (event.key === "Escape" && !updateMethodLayer.hidden) {
+            hidePopup(updateMethodLayer);
+            updateButton.focus();
             return;
         }
         if (event.key === "Escape" && !infoDialogLayer.hidden) {
@@ -2763,6 +3125,7 @@
 
     window.addEventListener("resize", () => {
         updatePlayerListHeight();
+        if (!manualReportHelpTooltip.hidden) positionManualReportHelpTooltip();
         if (launcherSettings.left === null || launcherSettings.top === null) return;
         applyLauncherSettings();
         persistLauncherSettings();
