@@ -1,5 +1,7 @@
 <h1 align="center">Kour Report</h1>
 
+![Kour Report banner](./assets/kourkbi-report-script-banner.jpg)
+
 <p align="center">
   <a href="https://discord.gg/R9wuHc6ucg">
     <img src="https://img.shields.io/badge/Discord-Join%20KBI-5865F2?logo=discord&logoColor=white" alt="Join the KBI Discord">
