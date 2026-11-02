@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      1.0.4
-// @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/R9wuHc6ucg
+// @version      1.0.5
+// @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/z9rwU6pcUP
 // @author       kourkbi
 // @license      MIT
 // @homepageURL  https://github.com/kourkbi/kour-report
@@ -14,7 +14,9 @@
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_info
+// @grant        GM.info
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @icon         https://raw.githubusercontent.com/kourkbi/kour-report/main/assets/menu/report-icon.png
 // ==/UserScript==
 
@@ -22,6 +24,7 @@
     "use strict";
 
     const PLAYER_AVATAR = "https://raw.githubusercontent.com/kourkbi/kour-report/main/assets/menu/player-avatar.jpg";
+    const DISCORD_URL = "https://discord.gg/z9rwU6pcUP";
 
     /***************************************
      * Match Detection
@@ -44,6 +47,15 @@
             [0xf3, 0x01, 0x00],
         ],
     };
+    // Reuse the ordered packet lookup table instead of allocating it for every socket message.
+    const REPORT_MATCH_PACKET_TYPES = [
+        ["welcome", REPORT_MATCH_SIGNATURES.welcome],
+        ["selfJoin", REPORT_MATCH_SIGNATURES.selfJoin],
+        ["join", REPORT_MATCH_SIGNATURES.join],
+        ["playerInfo", REPORT_MATCH_SIGNATURES.playerInfo],
+        ...REPORT_MATCH_SIGNATURES.leave.map((signature) => ["leave", signature]),
+        ...REPORT_MATCH_SIGNATURES.roomEnd.map((signature) => ["roomEnd", signature]),
+    ];
     const reportMatchState = { active: false, localId: null, localName: "", players: new Map() };
     let onReportMatchPlayersUpdated = null;
     let activeReportMatchSocket = null;
@@ -366,15 +378,14 @@
             return;
         }
 
-        const signatures = [
-            ["welcome", REPORT_MATCH_SIGNATURES.welcome],
-            ["selfJoin", REPORT_MATCH_SIGNATURES.selfJoin],
-            ["join", REPORT_MATCH_SIGNATURES.join],
-            ["playerInfo", REPORT_MATCH_SIGNATURES.playerInfo],
-            ...REPORT_MATCH_SIGNATURES.leave.map((signature) => ["leave", signature]),
-            ...REPORT_MATCH_SIGNATURES.roomEnd.map((signature) => ["roomEnd", signature]),
-        ];
-        const match = signatures.find(([, signature]) => reportPacketStartsWith(data, signature));
+        let match = null;
+        for (let index = 0; index < REPORT_MATCH_PACKET_TYPES.length; index += 1) {
+            const candidate = REPORT_MATCH_PACKET_TYPES[index];
+            if (reportPacketStartsWith(data, candidate[1])) {
+                match = candidate;
+                break;
+            }
+        }
         if (!match) return;
 
         try {
@@ -433,42 +444,47 @@
      * @see resetReportMatchPlayers
      */
     function installReportMatchSocketTracker() {
-        const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
-        const OriginalWebSocket = pageWindow.WebSocket;
-        if (!OriginalWebSocket || OriginalWebSocket.__kourReportMatchTracker) return;
-
-        const TrackedWebSocket = function (...args) {
-            const socket = new OriginalWebSocket(...args);
-            if (String(args[0] || "").toLowerCase().includes("exitgames")) {
-                let messageQueue = Promise.resolve();
-                socket.addEventListener("open", () => {
-                    activeReportMatchSocket = socket;
-                });
-                socket.addEventListener("message", (event) => {
-                    messageQueue = messageQueue
-                        .then(() => observeReportMatchPacket(event.data))
-                        .catch((error) => {
-                            console.warn("[Kour Report] Unable to process match player data.", error);
-                        });
-                });
-                socket.addEventListener("close", () => {
-                    if (activeReportMatchSocket !== socket) return;
-                    activeReportMatchSocket = null;
-                    messageQueue = messageQueue.then(resetReportMatchPlayers);
-                });
-            }
-            return socket;
-        };
-        TrackedWebSocket.prototype = OriginalWebSocket.prototype;
-        Object.setPrototypeOf(TrackedWebSocket, OriginalWebSocket);
-        Object.defineProperty(TrackedWebSocket, "__kourReportMatchTracker", { value: true });
         try {
+            const pageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+            const OriginalWebSocket = pageWindow.WebSocket;
+            if (!OriginalWebSocket || OriginalWebSocket.__kourReportMatchTracker) return;
+
+            const TrackedWebSocket = function (...args) {
+                const socket = new OriginalWebSocket(...args);
+                if (String(args[0] || "").toLowerCase().includes("exitgames")) {
+                    let messageQueue = Promise.resolve();
+                    socket.addEventListener("open", () => {
+                        activeReportMatchSocket = socket;
+                    });
+                    socket.addEventListener("message", (event) => {
+                        messageQueue = messageQueue
+                            .then(() => observeReportMatchPacket(event.data))
+                            .catch((error) => {
+                                console.warn("[Kour Report] Unable to process match player data.", error);
+                            });
+                    });
+                    socket.addEventListener("close", () => {
+                        if (activeReportMatchSocket !== socket) return;
+                        activeReportMatchSocket = null;
+                        messageQueue = messageQueue.then(resetReportMatchPlayers);
+                    });
+                }
+                return socket;
+            };
+            TrackedWebSocket.prototype = OriginalWebSocket.prototype;
+            if (typeof Object.setPrototypeOf === "function") {
+                Object.setPrototypeOf(TrackedWebSocket, OriginalWebSocket);
+            }
+            Object.defineProperty(TrackedWebSocket, "__kourReportMatchTracker", { value: true });
             pageWindow.WebSocket = TrackedWebSocket;
             if (pageWindow.WebSocket !== TrackedWebSocket) {
                 throw new Error("The page WebSocket constructor could not be wrapped.");
             }
         } catch (error) {
-            console.error("[Kour Report] Unable to start match player detection.", error);
+            console.warn(
+                "[Kour Report] Match player detection is unavailable in this userscript sandbox; manual reporting remains available.",
+                error
+            );
         }
     }
 
@@ -482,13 +498,24 @@
      * @see sendReport
      */
     function initialize() {
+    if (document.getElementById("kour-report-ui")) return;
+
     /***************************************
      * Configuration
      ***************************************/
-    const SCRIPT_VERSION = typeof GM_info !== "undefined" &&
-        GM_info.script.version && GM_info.script.version !== "dev"
-        ? GM_info.script.version
-        : "1.0.4";
+    let installedScriptVersion = "";
+    try {
+        if (typeof GM_info !== "undefined" && GM_info && GM_info.script) {
+            installedScriptVersion = GM_info.script.version || "";
+        } else if (typeof GM !== "undefined" && GM && GM.info && GM.info.script) {
+            installedScriptVersion = GM.info.script.version || "";
+        }
+    } catch (error) {
+        console.warn("[Kour Report] Could not read the installed userscript version:", error);
+    }
+    const SCRIPT_VERSION = installedScriptVersion && installedScriptVersion !== "dev"
+        ? installedScriptVersion
+        : "1.0.5";
     const GITHUB_REPOSITORY_URL = "https://github.com/kourkbi/kour-report";
     const GITHUB_SCRIPT_FILE_URL = "https://github.com/kourkbi/kour-report/blob/main/kour-report.js";
     const GREASYFORK_SCRIPT_URL = "https://greasyfork.org/scripts/602206-kour-report";
@@ -517,7 +544,6 @@
         foreground: UI_COLORS.ink,
     });
     const POPUP_EXIT_DURATION_MS = 150;
-    if (document.getElementById("kour-report-ui")) return;
 
     /***************************************
      * User Interface and Styles
@@ -746,7 +772,7 @@
                 text-overflow: ellipsis; white-space: nowrap;
             }
             .player-status { color: #858589; font-size: 10px; font-weight: 600; }
-            .player-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+            .player-actions { display: flex; flex: 0 0 auto; gap: 9px; }
             .player-action {
                 min-width: 100px; min-height: 36px; padding: 0 12px; border: 0; border-radius: var(--radius-dialog);
                 color: var(--color-white); background: linear-gradient(180deg, var(--color-control-highlight), var(--color-control-shadow)); cursor: pointer;
@@ -756,6 +782,212 @@
             }
             .player-action:hover { transform: scale(1.04); }
             .player-action.report { background: var(--gradient-report); }
+            /* Keep the pulse/ring limited to active calls; error and cooldown states use their own colors. */
+            .player-action.call-kbi {
+                position: relative;
+                display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+                line-height: 1;
+                border: 1px solid #65df91;
+                background: linear-gradient(180deg, #218d53, #17653e);
+                animation: call-kbi-pulse 1.3s ease-in-out infinite;
+                transition: border-color 240ms ease, box-shadow 240ms ease, filter 240ms ease;
+            }
+            .launcher-call-kbi {
+                position: fixed !important; z-index: 2147483647;
+                width: 79px; min-width: 79px; height: 79px; min-height: 79px;
+                box-sizing: border-box; padding: 7px 5px;
+                flex-direction: column; gap: 5px;
+                border: 2px solid #242424;
+                border-radius: 0;
+                color: var(--color-white);
+                background: linear-gradient(90deg, #383838 0%, #303030 100%);
+                box-shadow: 0 2px 7px rgba(0,0,0,0.45), inset 0 1px 0 #505050, inset 0 -2px 0 #222;
+                animation: none;
+                opacity: 0; visibility: hidden; pointer-events: none;
+                transform: scale(.94);
+                transform-origin: 100% 100%;
+                transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
+            }
+            .launcher-call-kbi.is-visible:hover {
+                background: #a5a5a5;
+                box-shadow: 0 5px 16px rgba(0,0,0,.55), inset 0 1px 0 #626262, inset 0 -2px 0 #222;
+            }
+            .launcher-call-kbi .call-kbi-icon {
+                width: var(--launcher-call-icon-size, 26px);
+                height: var(--launcher-call-icon-size, 26px);
+                flex-basis: var(--launcher-call-icon-size, 26px);
+            }
+            .launcher-call-kbi .call-kbi-icon svg {
+                width: var(--launcher-call-icon-size, 26px);
+                height: var(--launcher-call-icon-size, 26px);
+            }
+            .launcher-call-kbi .call-kbi-label {
+                font-weight: 700; line-height: 1.1; letter-spacing: -.25px;
+                font-family: "Trebuchet MS", Arial, sans-serif;
+            }
+            .launcher-call-kbi.is-visible {
+                opacity: 1; visibility: visible; pointer-events: auto;
+                transform: scale(1);
+                transition-delay: 0s;
+            }
+            .launcher-call-kbi.is-visible.is-hovered { transform: scale(1.12); }
+            .launcher-call-kbi.is-visible.neighbor-hover { border-bottom-color: transparent; }
+            .launcher-call-kbi .launcher-hover-seam {
+                position: absolute; left: 14%; bottom: -2px; width: 72%; height: 2px;
+                background: #242424; opacity: 0; pointer-events: none;
+                transition: opacity 180ms ease;
+            }
+            .launcher-call-kbi.is-visible.neighbor-hover .launcher-hover-seam { opacity: 1; }
+            .launcher-shortcut-wheel {
+                position: fixed; inset: 0; z-index: 2147483647;
+                pointer-events: none;
+            }
+            .launcher-shortcut-wheel[hidden] { display: none; }
+            .launcher-shortcut-hidden {
+                visibility: hidden !important; opacity: 0 !important; pointer-events: none !important;
+            }
+            .launcher-shortcut-wheel::before {
+                position: absolute; inset: 0;
+                background: rgba(8, 10, 9, .42);
+                content: ""; pointer-events: none;
+                -webkit-backdrop-filter: blur(6px);
+                backdrop-filter: blur(6px);
+            }
+            .launcher-shortcut-options {
+                position: fixed; top: 50%; left: 50%; display: flex;
+                width: min(560px, calc(100vw - 32px)); justify-content: center; gap: 18px;
+                padding: 28px; border: 1px solid #ffffff20; border-radius: 20px;
+                background: linear-gradient(145deg, #202522f5, #17191bf5);
+                box-shadow: 0 24px 70px #000b, 0 0 40px #39c96b18;
+                transform: translate(-50%, -50%); pointer-events: none;
+            }
+            .launcher-shortcut-hint {
+                position: absolute; top: 0; left: 50%;
+                padding: 7px 12px; border: 1px solid #ffffff24; border-radius: 7px;
+                color: #d7e8dc; background: #171719ef; font: 700 12px/1.2 Arial, sans-serif;
+                text-align: center; white-space: nowrap; transform: translate(-50%, -50%);
+            }
+            .launcher-shortcut-option {
+                position: relative; display: flex; min-width: 0; min-height: 150px; flex: 1 1 0;
+                flex-direction: column; align-items: center; justify-content: center; gap: 15px;
+                padding: 18px; border: 1px solid #55555a; border-radius: 14px;
+                color: #f5f5f5; background: linear-gradient(180deg, #38383c, #242427);
+                box-shadow: 0 8px 22px #0008; cursor: pointer; font: 800 17px/1.2 Arial, sans-serif;
+                pointer-events: auto; transition: background 180ms ease, border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+            }
+            .launcher-shortcut-option svg { width: 34px; height: 34px; flex: 0 0 34px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+            .launcher-shortcut-option.is-selected {
+                z-index: 1; border-color: #fff; background: linear-gradient(180deg, #56565b, #39393e);
+                box-shadow: 0 14px 34px #000b, 0 0 0 3px #ffffff18;
+                transform: translateY(-4px) scale(1.04);
+            }
+            .launcher-shortcut-option.menu.is-selected {
+                border-color: #ff8a84; color: #fff;
+                background: linear-gradient(160deg, #a93636, #612323);
+                box-shadow: 0 0 30px #ec484852, inset 0 1px 0 #ffffff35;
+            }
+            .launcher-shortcut-option.call {
+                border-color: #42bd70; color: #eaffef;
+                background: linear-gradient(160deg, #287d4a, #174b30);
+                box-shadow: 0 0 20px #38d97532, inset 0 1px 0 #ffffff26;
+            }
+            .launcher-shortcut-option.call::after {
+                position: absolute; inset: -5px; border: 1px solid #58df8b90;
+                border-radius: 18px; content: ""; pointer-events: none;
+                animation: shortcut-call-ring 1.8s ease-out infinite;
+            }
+            .launcher-shortcut-option.call.is-selected {
+                border-color: #a0ffbd; color: #fff;
+                background: linear-gradient(160deg, #35a862, #1e7040);
+                box-shadow: 0 0 32px #39e77978, inset 0 1px 0 #ffffff45;
+                transform: translateY(-4px) scale(1.04);
+            }
+            @keyframes shortcut-call-ring {
+                0% { opacity: .8; transform: scale(.98); }
+                100% { opacity: 0; transform: scale(1.06); }
+            }
+            @media (max-width: 480px) {
+                .launcher-shortcut-options { width: calc(100vw - 24px); gap: 10px; padding: 22px 14px 14px; }
+                .launcher-shortcut-option { min-height: 124px; gap: 10px; padding: 12px 8px; font-size: 14px; }
+                .launcher-shortcut-option svg { width: 28px; height: 28px; flex-basis: 28px; }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .launcher-shortcut-option, .launcher-shortcut-option.call::after { transition: none; animation: none; }
+            }
+            .launcher-call-kbi::before { border-radius: inherit; }
+            .launcher-call-kbi::after { inset: -5px; display: none; }
+            .player-action.call-kbi::before {
+                position: absolute; z-index: 0; inset: 0; border-radius: inherit;
+                background: linear-gradient(180deg, #218d53, #17653e);
+                content: ""; opacity: 0; pointer-events: none;
+                transition: opacity 260ms ease, background 260ms ease;
+            }
+            .player-action.call-kbi:not(.is-error):not(.is-success):not(.is-cooldown)::after {
+                position: absolute; z-index: 0; inset: -4px;
+                border: 2px solid #65df91; border-radius: inherit;
+                content: ""; pointer-events: none;
+                box-shadow: 0 0 10px #43df8ab0;
+                animation: call-kbi-ring 1.3s ease-out infinite;
+            }
+            .call-kbi-icon, .call-kbi-label { position: relative; z-index: 1; }
+            .call-kbi-label { display: inline-block; }
+            .call-kbi-label.is-changing { animation: call-kbi-label-enter 220ms ease-out both; }
+            .call-kbi-icon { display: inline-flex; width: 16px; height: 16px; flex: 0 0 16px; align-items: center; justify-content: center; }
+            .call-kbi-icon svg { width: 16px; height: 16px; fill: currentColor; }
+            .player-action.call-kbi.is-loading { cursor: progress; }
+            .player-action.call-kbi.is-loading:disabled { opacity: 1; }
+            .player-action.call-kbi.is-loading .call-kbi-icon {
+                border: 2px solid #ffffff70; border-top-color: var(--color-white); border-radius: 50%;
+                animation: call-kbi-spin .75s linear infinite;
+            }
+            .player-action.call-kbi.is-loading .call-kbi-icon svg { display: none; }
+            .player-action.call-kbi.is-success { border-color: #9af0b4; background: #17653e; }
+            .player-action.call-kbi.is-error {
+                border-color: #ff9a9a;
+                animation: none; box-shadow: 0 0 8px #ed343470;
+            }
+            .player-action.call-kbi.is-error::before {
+                background: linear-gradient(180deg, #a83232, #7d2020);
+                opacity: 1;
+            }
+            .player-action.call-kbi.is-error::after { display: none; }
+            .player-action.call-kbi.is-cooldown {
+                cursor: not-allowed; border-color: #ffe36e;
+                animation: none; box-shadow: 0 0 8px #f4c84270;
+            }
+            .player-action.call-kbi.is-cooldown::before {
+                background: linear-gradient(180deg, #a98218, #70530d);
+                opacity: 1;
+            }
+            .player-action.call-kbi.is-cooldown::after { display: none; }
+            .player-action.call-kbi.is-cooldown:disabled { opacity: 1; }
+            .player-action.call-kbi.is-pressed {
+                color: var(--button-press-foreground);
+                background: var(--button-press-background);
+                border-color: var(--button-press-background);
+                animation: none; box-shadow: var(--shadow-control-pressed);
+            }
+            .player-action.call-kbi.is-pressed::before { opacity: 0; }
+            @keyframes call-kbi-pulse {
+                0%, 100% { box-shadow: 0 0 5px #43df8a85, var(--shadow-control-highlight); }
+                50% { box-shadow: 0 0 18px #43df8ae0, var(--shadow-control-highlight); }
+            }
+            @keyframes call-kbi-ring {
+                0% { opacity: .95; transform: scale(.94); }
+                100% { opacity: 0; transform: scale(1.24); }
+            }
+            @keyframes call-kbi-label-enter {
+                from { opacity: 0; transform: translateY(4px) scale(.96); }
+                to { opacity: 1; transform: translateY(0) scale(1); }
+            }
+            @keyframes call-kbi-spin { to { transform: rotate(360deg); } }
+            @media (prefers-reduced-motion: reduce) {
+                .player-action.call-kbi, .player-action.call-kbi::before,
+                .player-action.call-kbi::after, .call-kbi-label.is-changing,
+                .player-action.call-kbi.is-loading .call-kbi-icon { animation: none; }
+                .player-action.call-kbi, .player-action.call-kbi::before { transition: none; }
+                .launcher-call-kbi { transition: none; }
+            }
             .player-action:active, .player-action.is-pressed {
                 text-shadow: none; box-shadow: var(--shadow-control-pressed);
             }
@@ -767,14 +999,16 @@
                 letter-spacing: -0.1px; text-align: center; text-shadow: 0 1px 1px var(--color-shadow);
             }
             .empty-state[hidden] { display: none; }
-            .manual-report-row {
-                display: flex; justify-content: center; margin: 12px 0;
+            .menu-report-actions {
+                display: flex; justify-content: center; flex-wrap: wrap; gap: 9px;
+                margin: 12px 0;
             }
-            .manual-report-row[hidden] { display: none; }
+            .empty-state .menu-report-actions { margin: 0; }
             .manual-report-button {
                 min-width: 150px; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
             }
             .manual-report-button svg { width: 17px; height: 17px; flex: 0 0 17px; fill: currentColor; }
+            .menu-call-kbi { min-width: 150px; }
             .popup-layer {
                 position: fixed; inset: 0; z-index: 3; display: grid; place-items: center;
                 padding: var(--overlay-padding); background: var(--color-overlay-dim); pointer-events: auto;
@@ -784,6 +1018,7 @@
             .popup-layer:not(.is-closing) > .settings-dialog,
             .popup-layer:not(.is-closing) > .report-dialog,
             .popup-layer:not(.is-closing) > .verification-dialog,
+            .popup-layer:not(.is-closing) > .menu-call-link-dialog,
             .popup-layer:not(.is-closing) > .update-method-dialog {
                 animation: var(--animation-popup-enter);
             }
@@ -794,6 +1029,7 @@
             .popup-layer.is-closing > .settings-dialog,
             .popup-layer.is-closing > .report-dialog,
             .popup-layer.is-closing > .verification-dialog,
+            .popup-layer.is-closing > .menu-call-link-dialog,
             .popup-layer.is-closing > .update-method-dialog {
                 animation: popup-dialog-exit var(--duration-exit) ease-in both;
             }
@@ -998,7 +1234,9 @@
             .contributor-row { min-height: 50px; }
             .contributor-row .player-name { display: flex; align-items: center; gap: 6px; }
             .contributor-clan { color: #e54343; }
-            .contributor-clan.ktbi { color: #00e987; }
+            .contributor-clan.xkbi { color: #ff0000; }
+            .contributor-clan.ktbi { color: #2aff8d; }
+            .contributor-clan.tfz { color: #7d80ff; }
             .contributor-row .player-status {
                 color: var(--color-text-muted); font: 700 10px/1.3 var(--font-decorative);
                 letter-spacing: -0.1px; text-shadow: 0 1px 1px var(--color-shadow);
@@ -1027,6 +1265,82 @@
                 width: min(${Math.round(440 * WINDOW_SIZE_SCALE)}px, 100%); padding: 20px; border: 1px solid var(--color-border-dialog);
                 border-radius: var(--radius-dialog); color: var(--color-text-primary); background: var(--color-dialog);
                 box-shadow: var(--shadow-dialog);
+            }
+            .menu-call-link-layer { z-index: 3; }
+            .menu-call-link-layer[hidden] { display: none; }
+            .menu-call-warning-layer { z-index: 3; }
+            .menu-call-warning-layer[hidden] { display: none; }
+            .menu-call-link-dialog {
+                position: relative; overflow: hidden;
+                width: min(${Math.round(440 * WINDOW_SIZE_SCALE)}px, 100%); padding: 20px;
+                border: 1px solid #34764f; border-radius: var(--radius-dialog);
+                color: var(--color-text-primary);
+                background: linear-gradient(145deg, #202a25 0%, var(--color-dialog) 42%, #1b1d21 100%);
+                box-shadow: 0 16px 42px #000b, 0 0 28px #25a85b25;
+                animation: call-link-dialog-enter 360ms cubic-bezier(.2, .8, .2, 1) both;
+            }
+            .menu-call-link-dialog::before {
+                position: absolute; top: 0; right: 0; left: 0; height: 3px;
+                background: linear-gradient(90deg, #30d878, #a4ffc5, #30d878);
+                content: ""; transform-origin: left center;
+                animation: call-link-accent-enter 650ms ease-out both;
+            }
+            .menu-call-link-heading {
+                display: flex; align-items: center; gap: 13px; margin-bottom: 8px;
+            }
+            .menu-call-link-icon {
+                position: relative; display: grid; width: 48px; height: 48px; flex: 0 0 48px;
+                place-items: center; border: 1px solid #63d98d; border-radius: 14px;
+                color: #b8ffcf; background: linear-gradient(145deg, #25844c, #155331);
+                box-shadow: 0 0 18px #42d87945, inset 0 1px 0 #ffffff35;
+                animation: call-link-icon-pulse 1.8s ease-in-out infinite;
+            }
+            .menu-call-link-icon::after {
+                position: absolute; inset: -5px; border: 1px solid #58df8b80;
+                border-radius: 17px; content: ""; pointer-events: none;
+                animation: call-link-icon-ring 1.8s ease-out infinite;
+            }
+            .menu-call-link-icon svg {
+                width: 25px; height: 25px; fill: none; stroke: currentColor;
+                stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+            }
+            .menu-call-link-eyebrow {
+                margin: 0 0 3px; color: #7fe6a2;
+                font: 800 10px/1.2 var(--font-ui); letter-spacing: 1.3px;
+            }
+            .menu-call-link-title { margin: 0; }
+            .menu-call-link-description {
+                margin: 12px 0 18px; padding-left: 61px;
+            }
+            .menu-call-link-form .report-field label { color: #c9f0d5; }
+            .menu-call-link-form input:focus {
+                border-color: #59cf82; background: #252d29;
+                box-shadow: 0 0 0 3px #36b86625;
+            }
+            .menu-call-link-form { display: flex; flex-direction: column; gap: 12px; }
+            .menu-call-link-status[hidden] { display: none; }
+            .menu-call-warning-dialog { max-width: 470px; }
+            .menu-call-warning-dialog .menu-call-link-description { padding-left: 0; }
+            .menu-call-warning-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+            @keyframes call-link-dialog-enter {
+                from { opacity: 0; transform: translateY(12px) scale(.97); }
+                to { opacity: 1; transform: translateY(0) scale(1); }
+            }
+            @keyframes call-link-accent-enter {
+                from { transform: scaleX(0); }
+                to { transform: scaleX(1); }
+            }
+            @keyframes call-link-icon-pulse {
+                0%, 100% { box-shadow: 0 0 12px #42d87935, inset 0 1px 0 #ffffff35; }
+                50% { box-shadow: 0 0 24px #42d87975, inset 0 1px 0 #ffffff45; }
+            }
+            @keyframes call-link-icon-ring {
+                0% { opacity: .8; transform: scale(.9); }
+                100% { opacity: 0; transform: scale(1.2); }
+            }
+            @media (prefers-reduced-motion: reduce) {
+                .menu-call-link-dialog, .menu-call-link-dialog::before,
+                .menu-call-link-icon, .menu-call-link-icon::after { animation: none; }
             }
             .verification-title {
                 margin: 0; color: var(--color-text-heading);
@@ -1083,7 +1397,6 @@
                 padding: 11px 13px; color: var(--color-text-primary); background: #222225;
                 font: inherit; font-size: 15px; font-weight: 750; transition: background var(--duration-control) ease, border-color var(--duration-control) ease;
             }
-            .report-field input[readonly] { overflow: hidden; color: var(--color-text-subtle); text-overflow: ellipsis; }
             .report-field input::placeholder, .report-field textarea::placeholder { color: #828286; opacity: 1; }
             .report-field input:focus, .report-field textarea:focus {
                 border-color: #77777d; background: #29292d;
@@ -1107,7 +1420,7 @@
             .reason-trigger:hover { background: #464649; }
             .reason-options {
                 position: absolute; z-index: 3; top: calc(100% + 4px); right: 0; left: 0;
-                max-height: 176px; overflow-y: auto; overflow-x: hidden; padding: 4px; border: 1px solid #4a4a4d;
+                max-height: 220px; overflow-y: auto; overflow-x: hidden; padding: 4px; border: 1px solid #4a4a4d;
                 border-radius: var(--radius-card); background: #3b3b3e; box-shadow: 0 8px 20px var(--color-shadow);
                 scrollbar-color: var(--scrollbar-thumb) transparent; scrollbar-width: thin;
                 transform-origin: top center; animation: reason-options-enter var(--duration-dropdown) ease-out both;
@@ -1155,15 +1468,22 @@
                     border-color var(--button-press-duration) ease,
                     filter var(--button-press-duration) ease;
             }
+            .launcher-call-kbi.button-pressable {
+                transition: transform 180ms ease, box-shadow 180ms ease,
+                    border-color 180ms ease, opacity 180ms ease, visibility 0s linear 180ms;
+            }
             @media (prefers-reduced-motion: reduce) {
                 .info-dialog, .settings-dialog, .report-dialog, .verification-layer, .verification-dialog, .update-method-dialog, .reason-options,
                 .popup-layer.is-closing, .popup-layer.is-closing > .info-dialog, .popup-layer.is-closing > .settings-dialog,
                 .popup-layer.is-closing > .report-dialog, .popup-layer.is-closing > .verification-dialog, .popup-layer.is-closing > .update-method-dialog,
+                .popup-layer.is-closing > .menu-call-link-dialog,
                 .popup-layer:not(.is-closing), .popup-layer:not(.is-closing) > .info-dialog,
                 .popup-layer:not(.is-closing) > .settings-dialog, .popup-layer:not(.is-closing) > .report-dialog,
                 .popup-layer:not(.is-closing) > .verification-dialog, .popup-layer:not(.is-closing) > .update-method-dialog,
+                .popup-layer:not(.is-closing) > .menu-call-link-dialog,
                 .panel.open, .panel.open .main, .panel.is-closing, .panel.is-closing .main { animation: none; }
-                .button-pressable, .reason-control { transition: none; }
+                .button-pressable, .reason-control,
+                .launcher-call-kbi.button-pressable { transition: none; }
             }
             .report-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 3px; }
             .report-dialog-button {
@@ -1222,13 +1542,18 @@
                     <h2 class="players-heading" hidden>Players</h2>
                     <div class="player-list" aria-live="polite"></div>
                     <div class="empty-state">
-                        <span class="empty-state-message">Join a match to see players available to report.</span>
-                        <button class="report-dialog-button submit manual-report-button" type="button">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h12.1a6.5 6.5 0 0 1-.1-1 6.5 6.5 0 0 1 2.05-4.74A13.2 13.2 0 0 0 12 14Zm6 0v3h-3v2h3v3h2v-3h3v-2h-3v-3h-2Z"/></svg>
-                            <span>Report manually</span>
-                        </button>
+                        <span class="empty-state-message">The player list is unavailable right now. If you're in a match, match detection may not be working. You can still submit a manual report.</span>
+                        <div class="menu-report-actions">
+                            <button class="report-dialog-button submit manual-report-button" type="button">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h12.1a6.5 6.5 0 0 1-.1-1 6.5 6.5 0 0 1 2.05-4.74A13.2 13.2 0 0 0 12 14Zm6 0v3h-3v2h3v3h2v-3h3v-2h-3v-3h-2Z"/></svg>
+                                <span>Report manually</span>
+                            </button>
+                            <button class="player-action call-kbi menu-call-kbi" type="button" data-call-player-key="__menu__" data-player-name="the current match">
+                                <span class="call-kbi-icon" aria-hidden="true"></span>
+                                <span class="call-kbi-label"></span>
+                            </button>
+                        </div>
                     </div>
-                    <div class="manual-report-row" hidden></div>
                     <footer class="menu-footer">
                         <div class="menu-footer-actions">
                             <button class="top-action-button discord-button" type="button" aria-label="Discord">
@@ -1262,6 +1587,49 @@
                         </span>
                     </footer>
                 </main>
+            </div>
+            <div class="menu-call-link-layer popup-layer" hidden>
+                <section class="menu-call-link-dialog" role="dialog" aria-modal="true" aria-labelledby="menu-call-link-title">
+                    <header class="menu-call-link-heading">
+                        <span class="menu-call-link-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M7.2 3.8 10 3l2 4.8-2.1 1.6a15 15 0 0 0 4.7 4.7l1.6-2.1 4.8 2-.8 2.8a3 3 0 0 1-3.3 2.1A17.5 17.5 0 0 1 5.1 7.1a3 3 0 0 1 2.1-3.3Z"/></svg>
+                        </span>
+                        <span>
+                            <span class="menu-call-link-eyebrow">KBI CALL REQUEST</span>
+                            <h2 class="verification-title menu-call-link-title" id="menu-call-link-title">Call KBI</h2>
+                        </span>
+                    </header>
+                    <p class="verification-description menu-call-link-description" id="menu-call-link-description">Enter the Kour room link so KBI can identify the match. If you don't have one, join a match first.</p>
+                    <form class="menu-call-link-form">
+                        <div class="report-field">
+                            <label for="menu-call-room-link">Room link</label>
+                            <input id="menu-call-room-link" type="text" autocomplete="url" aria-describedby="menu-call-link-description" placeholder="https://kour.io/#ABC123">
+                        </div>
+                        <p class="report-form-status menu-call-link-status" role="status" aria-live="polite" hidden></p>
+                        <div class="report-dialog-actions">
+                            <button class="report-dialog-button menu-call-link-cancel" type="button">Cancel</button>
+                            <button class="report-dialog-button submit" type="submit">Continue</button>
+                        </div>
+                    </form>
+                </section>
+            </div>
+            <div class="menu-call-warning-layer popup-layer" hidden>
+                <section class="menu-call-link-dialog menu-call-warning-dialog" role="dialog" aria-modal="true" aria-labelledby="menu-call-warning-title">
+                    <header class="menu-call-link-heading">
+                        <span class="menu-call-link-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M7.2 3.8 10 3l2 4.8-2.1 1.6a15 15 0 0 0 4.7 4.7l1.6-2.1 4.8 2-.8 2.8a3 3 0 0 1-3.3 2.1A17.5 17.5 0 0 1 5.1 7.1a3 3 0 0 1 2.1-3.3Z"/></svg>
+                        </span>
+                        <span>
+                            <span class="menu-call-link-eyebrow">PLAYERS DETECTED</span>
+                            <h2 class="verification-title menu-call-link-title" id="menu-call-warning-title">Choose who to call</h2>
+                        </span>
+                    </header>
+                    <p class="verification-description menu-call-link-description">Players are visible in this room. We recommend selecting a player to call KBI, and using Call Room only if you don't see a player you want to call.</p>
+                    <div class="menu-call-warning-actions">
+                        <button class="report-dialog-button menu-call-warning-choose" type="button">Choose a player</button>
+                        <button class="report-dialog-button submit menu-call-warning-continue" type="button">Continue anyway</button>
+                    </div>
+                </section>
             </div>
             <div class="update-method-layer popup-layer" hidden>
                 <section class="update-method-dialog" role="dialog" aria-modal="true" aria-labelledby="update-method-title">
@@ -1312,11 +1680,11 @@
                             <h3>Community contributors</h3>
                             <div class="player-row contributor-row">
                                 <div class="player-avatar" aria-hidden="true"><img class="contributor-avatar" alt=""></div>
-                                <div class="player-info"><div class="player-name"><span>user71184</span></div><div class="player-status">CREATOR</div></div>
+                                <div class="player-info"><div class="player-name"><span class="contributor-clan xkbi">[XKBI]</span><span>user71184</span></div><div class="player-status">CREATOR</div></div>
                             </div>
                             <div class="player-row contributor-row">
                                 <div class="player-avatar" aria-hidden="true"><img class="contributor-avatar" alt=""></div>
-                                <div class="player-info"><div class="player-name"><span>zombiezach12</span></div><div class="player-status">CONTRIBUTOR CODER</div></div>
+                                <div class="player-info"><div class="player-name"><span class="contributor-clan tfz">[TFZ]</span><span class="contributor-name tfz">zombiezach12</span></div><div class="player-status">CONTRIBUTOR CODER</div></div>
                             </div>
                             <div class="player-row contributor-row">
                                 <div class="player-avatar" aria-hidden="true"><img class="contributor-avatar" alt=""></div>
@@ -1324,7 +1692,7 @@
                             </div>
                         </div>
                         <div class="info-dialog-links">
-                            <a class="info-dialog-discord" href="https://discord.gg/R9wuHc6ucg" target="_blank" rel="noopener noreferrer">
+                            <a class="info-dialog-discord" href="${DISCORD_URL}" target="_blank" rel="noopener noreferrer">
                                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.7 5.2A18.3 18.3 0 0 0 15.2 3.8l-.6 1.2a16.8 16.8 0 0 0-5.2 0l-.6-1.2a18.3 18.3 0 0 0-4.5 1.4C1.5 9.4.7 13.5 1.1 17.5a18.4 18.4 0 0 0 5.5 2.8l1.2-2a11.8 11.8 0 0 1-1.9-.9l.5-.4a13.1 13.1 0 0 0 11.2 0l.5.4a11.8 11.8 0 0 1-1.9.9l1.2 2a18.4 18.4 0 0 0 5.5-2.8c.5-4.7-.8-8.8-3.2-12.3ZM8.7 14.8c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Zm6.6 0c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2Z"/></svg>
                                 <span>Join the official KBI Discord</span>
                             </a>
@@ -1352,10 +1720,24 @@
                         </div>
                         <div class="settings-row" data-setting-row="hideIcon">
                             <span class="settings-copy">
-                                <span class="settings-label">Hide the report icon</span>
+                                <span class="settings-label">Hide the Report button only</span>
                                 <span class="settings-default">Default: Off</span>
                             </span>
-                            <input class="settings-checkbox" data-setting="hideIcon" type="checkbox" aria-label="Hide the report icon">
+                            <input class="settings-checkbox" data-setting="hideIcon" type="checkbox" aria-label="Hide the Report button only">
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-copy">
+                                <span class="settings-label">Hide the Call KBI button only</span>
+                                <span class="settings-default">Default: Off</span>
+                            </span>
+                            <input class="settings-checkbox" data-setting="hideCallIcon" type="checkbox" aria-label="Hide the Call KBI button only">
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-copy">
+                                <span class="settings-label">Hide both Report and Call KBI buttons</span>
+                                <span class="settings-default">Default: Off</span>
+                            </span>
+                            <input class="settings-checkbox" data-setting="hideBothButtons" type="checkbox" aria-label="Hide both Report and Call KBI buttons">
                         </div>
                         <div class="settings-row">
                             <label class="settings-copy" for="settings-opacity">
@@ -1370,11 +1752,11 @@
                         <div class="settings-row">
                             <label class="settings-copy" for="settings-size">
                                 <span class="settings-label">Icon size</span>
-                                <span class="settings-default">Default: 88 px</span>
+                                <span class="settings-default">Default: 79 px</span>
                             </label>
                             <span class="settings-range-group">
-                                <input class="settings-range" id="settings-size" data-setting="size" type="range" min="48" max="140" step="4">
-                                <output class="settings-value" data-value="size">88 px</output>
+                                <input class="settings-range" id="settings-size" data-setting="size" type="range" min="44" max="140" step="1">
+                                <output class="settings-value" data-value="size">79 px</output>
                             </span>
                         </div>
                         <div class="settings-row">
@@ -1412,7 +1794,7 @@
                                 <label for="report-target">Reported player</label>
                                 <button class="report-target-help" type="button" aria-label="Help for reported player name" aria-describedby="manual-report-help-tooltip">?</button>
                             </div>
-                            <input id="report-target" name="target" type="text" required readonly>
+                            <input id="report-target" name="target" type="text" required>
                         </div>
                         <div class="report-field">
                             <label for="report-session-link">Room link</label>
@@ -1450,18 +1832,18 @@
                 </section>
                 <div class="tooltip manual-report-help-tooltip" id="manual-report-help-tooltip" role="tooltip" hidden>If you don't know the player's full name or it's difficult to spell, leave this field empty or enter only the part you know.</div>
             </div>
-            <div class="verification-layer popup-layer" hidden>
-                <section class="verification-dialog" role="dialog" aria-modal="true" aria-labelledby="verification-title">
-                    <h2 class="verification-title" id="verification-title">Security check</h2>
-                    <p class="verification-description">Complete this check to send your report.</p>
-                    <div class="verification-widget"></div>
-                    <p class="verification-status" role="status" aria-live="polite"></p>
-                    <div class="verification-actions">
-                        <button class="report-dialog-button cancel-verification" type="button">Cancel</button>
-                    </div>
-                </section>
-            </div>
         </section>
+        <div class="verification-layer popup-layer" hidden>
+            <section class="verification-dialog" role="dialog" aria-modal="true" aria-labelledby="verification-title">
+                <h2 class="verification-title" id="verification-title">Security check</h2>
+                <p class="verification-description">Complete this check to send your report.</p>
+                <div class="verification-widget"></div>
+                <p class="verification-status" role="status" aria-live="polite"></p>
+                <div class="verification-actions">
+                    <button class="report-dialog-button cancel-verification" type="button">Cancel</button>
+                </div>
+            </section>
+        </div>
     `;
 
     const launcher = document.createElement("button");
@@ -1476,11 +1858,13 @@
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        width: "88px",
-        height: "88px",
+        width: "79px",
+        height: "79px",
+        minWidth: "0",
+        minHeight: "0",
         flexDirection: "column",
         gap: "5px",
-        padding: "9px 6px",
+        padding: "8px 6px",
         boxSizing: "border-box",
         border: "2px solid #242424",
         outline: "none",
@@ -1489,11 +1873,66 @@
         background: "linear-gradient(90deg, #383838 0%, #303030 100%)",
         boxShadow: "0 2px 7px rgba(0,0,0,0.45), inset 0 1px 0 #505050, inset 0 -2px 0 #222",
         cursor: "pointer",
-        transformOrigin: "right center",
-        transition: `transform ${BUTTON_PRESS.durationMs}ms ease, box-shadow ${BUTTON_PRESS.durationMs}ms ease`,
+        transformOrigin: "100% 0%",
+        transition: "transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease",
         translate: "0 -50%",
         zIndex: "2147483646",
     });
+    const launcherQuickCall = document.createElement("button");
+    launcherQuickCall.type = "button";
+    launcherQuickCall.className = "player-action call-kbi launcher-call-kbi";
+    launcherQuickCall.dataset.callPlayerKey = "__menu__";
+    launcherQuickCall.dataset.playerName = "the current room";
+    launcherQuickCall.setAttribute("aria-label", "Call KBI for this room");
+    launcherQuickCall.title = "Call KBI for the current room.";
+    const launcherQuickCallIcon = document.createElement("span");
+    launcherQuickCallIcon.className = "call-kbi-icon";
+    launcherQuickCallIcon.setAttribute("aria-hidden", "true");
+    const launcherQuickCallLabel = document.createElement("span");
+    launcherQuickCallLabel.className = "call-kbi-label";
+    const launcherQuickCallSeam = document.createElement("span");
+    launcherQuickCallSeam.className = "launcher-hover-seam";
+    launcherQuickCallSeam.setAttribute("aria-hidden", "true");
+    launcherQuickCall.append(launcherQuickCallIcon, launcherQuickCallLabel, launcherQuickCallSeam);
+    shadow.appendChild(launcherQuickCall);
+    const launcherShortcutWheel = document.createElement("div");
+    launcherShortcutWheel.className = "launcher-shortcut-wheel";
+    launcherShortcutWheel.hidden = true;
+    launcherShortcutWheel.setAttribute("aria-hidden", "true");
+    const launcherShortcutOptions = document.createElement("div");
+    launcherShortcutOptions.className = "launcher-shortcut-options";
+    launcherShortcutOptions.setAttribute("role", "group");
+    launcherShortcutOptions.setAttribute("aria-label", "Launcher shortcut options");
+    const launcherShortcutHint = document.createElement("span");
+    launcherShortcutHint.className = "launcher-shortcut-hint";
+    launcherShortcutHint.textContent = "Choose an option, then release Alt";
+    launcherShortcutOptions.appendChild(launcherShortcutHint);
+    function createLauncherShortcutOption(action, label, iconMarkup) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = `launcher-shortcut-option ${action}`;
+        option.dataset.shortcutAction = action;
+        option.setAttribute("aria-label", label);
+        option.setAttribute("aria-pressed", "false");
+        option.innerHTML = `${iconMarkup}<span>${label}</span>`;
+        launcherShortcutOptions.appendChild(option);
+        return option;
+    }
+    const launcherShortcutMenuOption = createLauncherShortcutOption(
+        "menu",
+        "Open KBI Report",
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>'
+    );
+    const launcherShortcutCallOption = createLauncherShortcutOption(
+        "call",
+        "Call KBI",
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 3.8 10 3l2 4.8-2.1 1.6a15 15 0 0 0 4.7 4.7l1.6-2.1 4.8 2-.8 2.8a3 3 0 0 1-3.3 2.1A17.5 17.5 0 0 1 5.1 7.1a3 3 0 0 1 2.1-3.3Z"/></svg>'
+    );
+    launcherShortcutWheel.appendChild(launcherShortcutOptions);
+    shadow.appendChild(launcherShortcutWheel);
+    let launcherShortcutActive = false;
+    let launcherShortcutSelection = null;
+    let launcherShortcutOrigin = { x: 0, y: 0 };
     /**
      * Apply the launcher's pressed colors and shadow to its button and SVG.
      * @param {boolean} pressed Whether a pointer press is active.
@@ -1529,22 +1968,22 @@
     const releaseLauncher = () => {
         launcherPressed = false;
         setLauncherPressed(false);
-        launcher.style.transform = launcher.matches(":hover") ? "scale(1.12)" : "scale(1)";
+        updateLauncherHoverRelationship();
     };
     launcher.addEventListener("pointerup", releaseLauncher);
     launcher.addEventListener("pointercancel", releaseLauncher);
     launcher.addEventListener("pointerenter", () => {
         if (!launcherPressed) setLauncherPressed(false);
-        launcher.style.transform = "scale(1.12)";
+        updateLauncherHoverRelationship();
         launcher.style.boxShadow = "0 5px 16px rgba(0, 0, 0, 0.55), inset 0 1px 0 #626262, inset 0 -2px 0 #222";
     });
     launcher.addEventListener("pointerleave", () => {
         if (!launcherPressed) setLauncherPressed(false);
-        launcher.style.transform = "scale(1)";
+        updateLauncherHoverRelationship();
         launcher.style.boxShadow = "0 2px 7px rgba(0,0,0,0.45), inset 0 1px 0 #505050, inset 0 -2px 0 #222";
     });
     launcher.addEventListener("pointerup", () => {
-        if (launcher.matches(":hover")) launcher.style.transform = "scale(1.12)";
+        updateLauncherHoverRelationship();
     });
     launcher.addEventListener("pointerdown", (event) => {
         if (!launcherSettings.moveIcon || event.button !== 0) return;
@@ -1580,6 +2019,7 @@
         launcher.style.right = "auto";
         launcher.style.bottom = "auto";
         launcher.style.translate = "none";
+        updateLauncherQuickCallPosition();
     });
     const finishLauncherDrag = (event) => {
         if (!activeLauncherDrag || event.pointerId !== activeLauncherDrag.pointerId) return;
@@ -1592,6 +2032,7 @@
         }
         activeLauncherDrag = null;
         launcher.style.cursor = launcherSettings.moveIcon ? "grab" : "pointer";
+        updateLauncherQuickCallPosition();
     };
     launcher.addEventListener("pointerup", finishLauncherDrag);
     launcher.addEventListener("pointercancel", finishLauncherDrag);
@@ -1632,6 +2073,19 @@
         textShadow: "0 1px 1px rgba(0,0,0,0.65)",
         pointerEvents: "none",
     });
+    const launcherReportSeam = document.createElement("span");
+    launcherReportSeam.setAttribute("aria-hidden", "true");
+    Object.assign(launcherReportSeam.style, {
+        position: "absolute",
+        top: "-2px",
+        left: "14%",
+        width: "72%",
+        height: "2px",
+        background: "#242424",
+        opacity: "0",
+        pointerEvents: "none",
+        transition: "opacity 180ms ease",
+    });
     const updateBadge = document.createElement("span");
     updateBadge.textContent = "!";
     updateBadge.setAttribute("aria-hidden", "true");
@@ -1652,9 +2106,10 @@
     });
     launcher.appendChild(launcherIcon);
     launcher.appendChild(launcherLabel);
+    launcher.appendChild(launcherReportSeam);
     launcher.appendChild(updateBadge);
-    document.body.appendChild(host);
     document.body.appendChild(launcher);
+    document.body.appendChild(host);
 
     /***************************************
      * UI References and State
@@ -1687,6 +2142,8 @@
     const settingsInputs = {
         moveIcon: shadow.querySelector('[data-setting="moveIcon"]'),
         hideIcon: shadow.querySelector('[data-setting="hideIcon"]'),
+        hideCallIcon: shadow.querySelector('[data-setting="hideCallIcon"]'),
+        hideBothButtons: shadow.querySelector('[data-setting="hideBothButtons"]'),
         opacity: shadow.querySelector('[data-setting="opacity"]'),
         size: shadow.querySelector('[data-setting="size"]'),
     };
@@ -1698,8 +2155,18 @@
     const playerCount = shadow.querySelector("[data-player-count]");
     const emptyState = shadow.querySelector(".empty-state");
     const emptyStateMessage = shadow.querySelector(".empty-state-message");
-    const manualReportRow = shadow.querySelector(".manual-report-row");
+    const menuReportActions = shadow.querySelector(".menu-report-actions");
     const manualReportButton = shadow.querySelector(".manual-report-button");
+    const menuCallKbiButton = shadow.querySelector(".menu-call-kbi");
+    const menuCallLinkLayer = shadow.querySelector(".menu-call-link-layer");
+    const menuCallLinkForm = shadow.querySelector(".menu-call-link-form");
+    const menuCallRoomLinkInput = shadow.querySelector("#menu-call-room-link");
+    const menuCallLinkStatus = shadow.querySelector(".menu-call-link-status");
+    const menuCallLinkCancelButton = shadow.querySelector(".menu-call-link-cancel");
+    const menuCallLinkSubmitButton = menuCallLinkForm.querySelector('button[type="submit"]');
+    const menuCallWarningLayer = shadow.querySelector(".menu-call-warning-layer");
+    const menuCallWarningChooseButton = shadow.querySelector(".menu-call-warning-choose");
+    const menuCallWarningContinueButton = shadow.querySelector(".menu-call-warning-continue");
     const reportDialogLayer = shadow.querySelector(".report-dialog-layer");
     const reportForm = shadow.querySelector(".report-form");
     const reportTarget = shadow.querySelector("#report-target");
@@ -1714,8 +2181,8 @@
     const reportDetails = shadow.querySelector("#report-details");
     const reportDetailsCount = shadow.querySelector("#report-details-count");
     const reportCombinedReason = shadow.querySelector("#report-combined-reason");
-    const reportFormStatus = shadow.querySelector(".report-form-status");
-    const reportSubmitButton = shadow.querySelector(".report-dialog-button.submit");
+    const reportFormStatus = reportForm.querySelector(".report-form-status");
+    const reportSubmitButton = reportForm.querySelector('button[type="submit"]');
     const reportCancelButton = shadow.querySelector(".cancel-report");
     const reportDialogAvatar = shadow.querySelector(".report-dialog-avatar");
     const verificationLayer = shadow.querySelector(".verification-layer");
@@ -1726,12 +2193,19 @@
     let captchaWidgetId = null;
     let captchaScriptPromise = null;
     let captchaInProgress = false;
+    let captchaAttemptId = 0;
     let pendingReportPayload = null;
+    let pendingCallPlayerKey = null;
+    let pendingMenuCallPlayer = null;
     let reportedPlayerKey = null;
     let manualReport = false;
     let reportSessionLinkEdited = false;
     let reportSubmitting = false;
     let renderedPlayersSignature = null;
+    const MENU_CALL_PLAYER_KEY = "__menu__";
+    // Per-target UI state lets each player button and the room button show independent results.
+    const callKbiButtonStates = new Map();
+    const callKbiButtonTimers = new Map();
     const exitTimers = new WeakMap();
     let heldPressButton = null;
     let heldPressControl = null;
@@ -1751,8 +2225,10 @@
     const DEFAULT_LAUNCHER_SETTINGS = {
         moveIcon: false,
         hideIcon: false,
+        hideCallIcon: false,
+        hideBothButtons: false,
         opacity: 100,
-        size: 88,
+        size: 79,
         openKey: "AltLeft",
         toggleIconKey: "AltRight",
         left: null,
@@ -1794,11 +2270,13 @@
                 ...DEFAULT_LAUNCHER_SETTINGS,
                 moveIcon: savedSettings.moveIcon === true,
                 hideIcon: savedSettings.hideIcon === true,
+                hideCallIcon: savedSettings.hideCallIcon === true,
+                hideBothButtons: savedSettings.hideBothButtons === true,
                 opacity: Number.isFinite(savedSettings.opacity)
                     ? Math.min(100, Math.max(10, savedSettings.opacity))
                     : DEFAULT_LAUNCHER_SETTINGS.opacity,
                 size: Number.isFinite(savedSettings.size)
-                    ? Math.min(140, Math.max(48, savedSettings.size))
+                    ? Math.min(140, Math.max(44, [88, 66, 64, 52, 44].includes(savedSettings.size) ? 79 : savedSettings.size))
                     : DEFAULT_LAUNCHER_SETTINGS.size,
                 openKey: typeof savedSettings.openKey === "string" &&
                     savedSettings.openKey.length > 0 && savedSettings.openKey.length <= 30
@@ -1883,7 +2361,7 @@
         settingsKeyButtons.openKey.textContent = openKeyLabel;
         settingsKeyButtons.toggleIconKey.textContent = toggleIconKeyLabel;
         settingsHideIconWarning.textContent =
-            `Warning: With the icon hidden, press ${toggleIconKeyLabel} to show it again.\nPress ${openKeyLabel} to open or close the menu directly.`;
+            `Warning: With the buttons hidden, press ${toggleIconKeyLabel} to show them again.\nPress ${openKeyLabel} to open or close the menu directly.`;
         if (!settingsHideIconWarning.hidden) positionSettingsTooltip();
     }
 
@@ -1943,6 +2421,137 @@
     }
 
     /**
+     * Keep the hover quick-call directly above and right-aligned with the launcher.
+     * @see applyLauncherSettings
+     * @see setOpen
+     */
+    function updateLauncherQuickCallPosition() {
+        const buttonWidth = launcherSettings.size;
+        const buttonHeight = launcherSettings.size;
+        const launcherBounds = launcherSettings.hideIcon
+            ? {
+                right: launcherSettings.left !== null && launcherSettings.top !== null
+                    ? launcherSettings.left + buttonWidth
+                    : window.innerWidth,
+                top: launcherSettings.left !== null && launcherSettings.top !== null
+                    ? launcherSettings.top
+                    : (window.innerHeight - buttonHeight) / 2,
+            }
+            : launcher.getBoundingClientRect();
+        const callIconSize = Math.min(34, Math.round(buttonWidth * 0.38));
+        launcherQuickCall.style.boxSizing = "border-box";
+        launcherQuickCall.style.width = `${buttonWidth}px`;
+        launcherQuickCall.style.minWidth = `${buttonWidth}px`;
+        launcherQuickCall.style.height = `${buttonHeight}px`;
+        launcherQuickCall.style.minHeight = `${buttonHeight}px`;
+        launcherQuickCall.style.transformOrigin = "100% 100%";
+        launcherQuickCall.style.padding = `${Math.max(3, Math.round(buttonHeight * 0.1))}px`;
+        launcherQuickCall.style.gap = `${Math.max(2, Math.round(buttonHeight * 0.055))}px`;
+        launcherQuickCall.style.setProperty("--launcher-call-icon-size", `${callIconSize}px`);
+        launcherQuickCall.querySelector(".call-kbi-label").style.fontSize =
+            `${Math.max(9, Math.round(buttonWidth * 0.17))}px`;
+        launcherQuickCall.style.left = `${launcherBounds.right - buttonWidth}px`;
+        launcherQuickCall.style.top = `${launcherBounds.top - buttonHeight}px`;
+        launcherQuickCall.style.right = "auto";
+
+        const shouldShow = !launcherSettings.hideCallIcon &&
+            !launcherSettings.hideBothButtons &&
+            !launcherShortcutActive &&
+            !activeLauncherDrag &&
+            !panel.classList.contains("open");
+        if (shouldShow) {
+            launcherQuickCall.classList.add("is-visible");
+            launcherQuickCall.setAttribute("aria-hidden", "false");
+            launcherQuickCall.tabIndex = 0;
+        } else {
+            launcherQuickCall.classList.remove("is-visible");
+            launcherQuickCall.setAttribute("aria-hidden", "true");
+            launcherQuickCall.tabIndex = -1;
+        }
+        updateLauncherHoverRelationship();
+    }
+
+    function revealLauncherQuickCall() {
+        updateLauncherHoverRelationship();
+        updateLauncherQuickCallPosition();
+    }
+
+    function positionLauncherShortcutWheel() {
+        launcherShortcutOptions.style.left = "50%";
+        launcherShortcutOptions.style.top = "50%";
+    }
+
+    function updateLauncherShortcutSelection(clientX, clientY) {
+        const optionElements = [
+            launcherShortcutMenuOption,
+            launcherShortcutCallOption,
+        ];
+        launcherShortcutSelection = optionElements.find((option) => {
+            const bounds = option.getBoundingClientRect();
+            return clientX >= bounds.left && clientX <= bounds.right &&
+                clientY >= bounds.top && clientY <= bounds.bottom;
+        }) || null;
+        optionElements.forEach((option) => {
+            const selected = option === launcherShortcutSelection;
+            option.classList.toggle("is-selected", selected);
+            option.setAttribute("aria-pressed", String(selected));
+        });
+    }
+
+    function beginLauncherShortcutWheel() {
+        if (launcherShortcutActive || !settingsLayer.hidden || capturingKeySetting) return;
+        if (document.pointerLockElement) document.exitPointerLock();
+        launcherShortcutActive = true;
+        launcherShortcutSelection = null;
+        launcher.style.visibility = "hidden";
+        launcherQuickCall.classList.add("launcher-shortcut-hidden");
+        launcherShortcutWheel.hidden = false;
+        launcherShortcutWheel.setAttribute("aria-hidden", "false");
+        positionLauncherShortcutWheel();
+        updateLauncherQuickCallPosition();
+    }
+
+    function finishLauncherShortcutWheel(commit) {
+        if (!launcherShortcutActive) return;
+        const selectedAction = launcherShortcutSelection
+            ? launcherShortcutSelection.dataset.shortcutAction
+            : null;
+        launcherShortcutActive = false;
+        launcherShortcutSelection = null;
+        launcherShortcutWheel.hidden = true;
+        launcherShortcutWheel.setAttribute("aria-hidden", "true");
+        launcher.style.visibility = "";
+        launcherQuickCall.classList.remove("launcher-shortcut-hidden");
+        launcherShortcutMenuOption.classList.remove("is-selected");
+        launcherShortcutCallOption.classList.remove("is-selected");
+        launcherShortcutMenuOption.setAttribute("aria-pressed", "false");
+        launcherShortcutCallOption.setAttribute("aria-pressed", "false");
+        updateLauncherQuickCallPosition();
+        if (!commit) return;
+        if (selectedAction === "call") {
+            startKbiCall(null, getCurrentReportSessionLink(), { requireDetectedRoom: true });
+        } else if (selectedAction === "menu") {
+            setOpen(!panel.classList.contains("open"));
+        }
+    }
+
+    function updateLauncherHoverRelationship() {
+        const launcherHovered = launcher.matches(":hover") || document.activeElement === launcher;
+        const callVisible = launcherQuickCall.classList.contains("is-visible");
+        const callHovered = callVisible &&
+            (launcherQuickCall.matches(":hover") || shadow.activeElement === launcherQuickCall);
+        launcher.style.transformOrigin = "100% 0%";
+        launcherQuickCall.style.transformOrigin = "100% 100%";
+        launcherQuickCall.classList.toggle("is-hovered", callHovered);
+        launcherQuickCall.classList.toggle("neighbor-hover", launcherHovered && !callHovered && callVisible);
+        launcher.style.borderTopColor = callHovered ? "transparent" : "#242424";
+        launcherReportSeam.style.opacity = callHovered ? "1" : "0";
+        launcher.style.transform = callHovered
+            ? "scale(1)"
+            : launcherHovered && callVisible ? "scale(1.12)" : "scale(1)";
+    }
+
+    /**
      * Apply saved launcher preferences to its appearance, position, and controls.
      * @see persistLauncherSettings
      * @see DEFAULT_LAUNCHER_SETTINGS
@@ -1955,7 +2564,9 @@
         launcher.style.gap = `${Math.max(2, Math.round(size * 0.055))}px`;
         launcher.style.padding = `${Math.max(3, Math.round(size * 0.1))}px`;
         launcher.style.opacity = String(launcherSettings.opacity / 100);
-        launcher.style.display = launcherSettings.hideIcon ? "none" : "flex";
+        launcher.style.display = launcherSettings.hideIcon || launcherSettings.hideBothButtons
+            ? "none"
+            : "flex";
         launcher.style.cursor = launcherSettings.moveIcon ? "grab" : "pointer";
         launcherIcon.setAttribute("width", String(iconSize));
         launcherIcon.setAttribute("height", String(iconSize));
@@ -1980,11 +2591,14 @@
         }
         settingsInputs.moveIcon.checked = launcherSettings.moveIcon;
         settingsInputs.hideIcon.checked = launcherSettings.hideIcon;
+        settingsInputs.hideCallIcon.checked = launcherSettings.hideCallIcon;
+        settingsInputs.hideBothButtons.checked = launcherSettings.hideBothButtons;
         settingsInputs.opacity.value = String(launcherSettings.opacity);
         settingsInputs.size.value = String(launcherSettings.size);
         shadow.querySelector('[data-value="opacity"]').textContent = `${launcherSettings.opacity}%`;
         shadow.querySelector('[data-value="size"]').textContent = `${launcherSettings.size} px`;
         updateSettingsKeyLabels();
+        updateLauncherQuickCallPosition();
     }
     applyLauncherSettings();
 
@@ -2005,7 +2619,7 @@
     });
     discordButton.title = "Official Discord for KBI (Kour Bureau of Investigations)";
     discordButton.addEventListener("click", () => {
-        window.open("https://discord.gg/R9wuHc6ucg", "_blank", "noopener,noreferrer");
+        window.open(DISCORD_URL, "_blank", "noopener,noreferrer");
     });
     githubButton.title = "Kour Report repository on GitHub";
     githubButton.addEventListener("click", () => {
@@ -2077,6 +2691,19 @@
         button.addEventListener("blur", release);
     }
 
+    // Keep the paired launcher buttons synchronized for hover and keyboard focus.
+    launcher.addEventListener("pointerenter", revealLauncherQuickCall);
+    launcher.addEventListener("focus", revealLauncherQuickCall);
+    launcher.addEventListener("blur", revealLauncherQuickCall);
+    launcherQuickCall.addEventListener("pointerenter", revealLauncherQuickCall);
+    launcherQuickCall.addEventListener("pointerleave", revealLauncherQuickCall);
+    launcherQuickCall.addEventListener("focus", revealLauncherQuickCall);
+    launcherQuickCall.addEventListener("blur", revealLauncherQuickCall);
+    launcherQuickCall.addEventListener("click", () =>
+        startKbiCall(null, getCurrentReportSessionLink(), { requireDetectedRoom: true })
+    );
+    addButtonPressAnimation(launcherQuickCall);
+
     /**
      * Stop key capture, hide the settings dialog, and return focus to its opener.
      * @see settingsButton
@@ -2123,7 +2750,12 @@
     [settingsCloseButton, ...Object.values(settingsKeyButtons), settingsResetButton].forEach((button) => {
         addButtonPressAnimation(button);
     });
-    [settingsInputs.moveIcon, settingsInputs.hideIcon].forEach((checkbox) => {
+    [
+        settingsInputs.moveIcon,
+        settingsInputs.hideIcon,
+        settingsInputs.hideCallIcon,
+        settingsInputs.hideBothButtons,
+    ].forEach((checkbox) => {
         addButtonPressAnimation(checkbox);
     });
     const settingsRanges = [settingsInputs.opacity, settingsInputs.size];
@@ -2150,6 +2782,16 @@
     });
     settingsInputs.hideIcon.addEventListener("change", () => {
         launcherSettings.hideIcon = settingsInputs.hideIcon.checked;
+        applyLauncherSettings();
+        persistLauncherSettings();
+    });
+    settingsInputs.hideCallIcon.addEventListener("change", () => {
+        launcherSettings.hideCallIcon = settingsInputs.hideCallIcon.checked;
+        applyLauncherSettings();
+        persistLauncherSettings();
+    });
+    settingsInputs.hideBothButtons.addEventListener("change", () => {
+        launcherSettings.hideBothButtons = settingsInputs.hideBothButtons.checked;
         applyLauncherSettings();
         persistLauncherSettings();
     });
@@ -2184,18 +2826,22 @@
     /***************************************
      * Report Form and Verification
      ***************************************/
-    // Report and verification controls share the same pointer/keyboard press effect.
-    const cancelReportButton = shadow.querySelector(".cancel-report");
-    const submitReportButton = shadow.querySelector(".report-dialog-button.submit");
-    addButtonPressAnimation(cancelReportButton);
-    addButtonPressAnimation(submitReportButton);
+     // Report and verification controls share the same pointer/keyboard press effect.
+     const cancelReportButton = shadow.querySelector(".cancel-report");
+     addButtonPressAnimation(cancelReportButton);
+     addButtonPressAnimation(reportSubmitButton);
     addButtonPressAnimation(manualReportButton);
+    addButtonPressAnimation(menuCallKbiButton);
+    addButtonPressAnimation(menuCallLinkCancelButton);
+    addButtonPressAnimation(menuCallLinkSubmitButton);
+    addButtonPressAnimation(menuCallWarningChooseButton);
+    addButtonPressAnimation(menuCallWarningContinueButton);
     addButtonPressAnimation(verificationCancelButton);
     addButtonPressAnimation(reportReason, shadow.querySelector(".reason-control"));
     reportReasonButtons.forEach((option) => addButtonPressAnimation(option));
 
     /**
-     * Toggle the reason dropdown and constrain its height to the available dialog space.
+     * Keep the reason dropdown below its trigger and above the form actions.
      * @param {boolean} open Whether the reason choices should be visible.
      * @see reportReason
      * @see closeReportDialog
@@ -2204,9 +2850,9 @@
         reportReasonOptions.hidden = !open;
         reportReason.setAttribute("aria-expanded", String(open));
         if (open) {
-            const triggerBottom = reportReason.getBoundingClientRect().bottom;
-            const actionsTop = shadow.querySelector(".report-dialog-actions").getBoundingClientRect().top;
-            const availableHeight = Math.max(40, Math.min(176, actionsTop - triggerBottom - 8));
+            const triggerBounds = reportReason.getBoundingClientRect();
+            const actionsTop = reportForm.querySelector(".report-dialog-actions").getBoundingClientRect().top;
+            const availableHeight = Math.max(0, Math.min(220, actionsTop - triggerBounds.bottom - 8));
             reportReasonOptions.style.maxHeight = `${availableHeight}px`;
         } else {
             reportReasonOptions.style.maxHeight = "";
@@ -2226,7 +2872,6 @@
         hidePopup(reportDialogLayer);
         setReasonMenuOpen(false);
         reportForm.reset();
-        reportTarget.readOnly = true;
         reportFormStatus.hidden = true;
         reportFormStatus.removeAttribute("data-kind");
         selectedReportReason = "";
@@ -2246,6 +2891,194 @@
     }
 
     /**
+     * Animate label changes without replacing the button's accessible name container.
+     * @see applyCallKbiButtonState
+     */
+    function updateCallKbiLabel(label, text) {
+        if (label.textContent === text) return;
+        label.textContent = text;
+        label.classList.remove("is-changing");
+        void label.offsetWidth;
+        label.classList.add("is-changing");
+    }
+
+    /**
+     * Render one KBI button from its idle, loading, success, error, or cooldown state.
+     * @param {HTMLButtonElement} button Player-row or room-level KBI button.
+     * @param {object|null} state Current state from callKbiButtonStates.
+     * @see setCallKbiButtonState
+     */
+    function applyCallKbiButtonState(button, state) {
+        const status = state ? state.status : "idle";
+        const icon = button.querySelector(".call-kbi-icon");
+        const label = button.querySelector(".call-kbi-label");
+        const setClass = (className, enabled) => {
+            if (enabled) button.classList.add(className);
+            else button.classList.remove(className);
+        };
+        setClass("is-loading", status === "loading");
+        setClass("is-success", status === "success");
+        setClass("is-error", status === "error");
+        setClass("is-cooldown", status === "cooldown");
+        button.disabled = status === "loading" || status === "cooldown";
+        if (status === "loading") {
+            icon.textContent = "";
+            updateCallKbiLabel(label, "Calling…");
+            button.title = "Complete the security check to send the call.";
+            button.setAttribute("aria-label", `Calling KBI about ${button.dataset.playerName}`);
+        } else if (status === "cooldown") {
+            const secondsRemaining = Math.max(0, Math.ceil((state.cooldownUntil - Date.now()) / 1000));
+            const countdown = formatCallKbiCooldown(secondsRemaining);
+            icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 9v4l3 2M9 2h6M12 2v3M19 6l1.5-1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            updateCallKbiLabel(label, countdown);
+            button.title = `KBI call cooldown: ${countdown} remaining.`;
+            button.setAttribute("aria-label", `KBI call cooldown: ${countdown} remaining for ${button.dataset.playerName}`);
+        } else if (status === "success") {
+            icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="m8 12 2.5 2.5L16.5 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            updateCallKbiLabel(label, "Sent");
+            button.title = state.message;
+            button.setAttribute("aria-label", `KBI call sent for ${button.dataset.playerName}`);
+        } else if (status === "error") {
+            icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="m9 9 6 6m0-6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+            updateCallKbiLabel(label, "Error");
+            button.title = state.message;
+            button.setAttribute("aria-label", `KBI call failed for ${button.dataset.playerName}: ${state.message}`);
+        } else {
+            const isMenuButton = button.dataset.callPlayerKey === MENU_CALL_PLAYER_KEY &&
+                !button.classList.contains("launcher-call-kbi");
+            icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.2 3.8 10 3l2 4.8-2.1 1.6a15 15 0 0 0 4.7 4.7l1.6-2.1 4.8 2-.8 2.8a3 3 0 0 1-3.3 2.1A17.5 17.5 0 0 1 5.1 7.1a3 3 0 0 1 2.1-3.3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            updateCallKbiLabel(label, isMenuButton ? "Call Room" : "Call KBI");
+            button.title = isMenuButton
+                ? "Send a call to KBI for this room."
+                : `Send a call to KBI about ${button.dataset.playerName}`;
+            button.setAttribute("aria-label", isMenuButton
+                ? "Call KBI for this room"
+                : `Call KBI about ${button.dataset.playerName}`);
+        }
+    }
+
+    /**
+     * Format the server-provided retry delay for the button label.
+     * @param {number} totalSeconds Remaining cooldown in seconds.
+     * @returns {string} Compact countdown, such as "42s" or "1:05".
+     * @see setCallKbiButtonState
+     */
+    function formatCallKbiCooldown(totalSeconds) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return minutes > 0
+            ? `${minutes}:${seconds < 10 ? `0${seconds}` : seconds}`
+            : `${seconds}s`;
+    }
+
+    /**
+     * Store and fan out a KBI result to matching buttons, including newly rendered rows.
+     * Success/error states expire automatically; cooldown ticks until the button returns idle.
+     * @param {string} playerKey Player key or MENU_CALL_PLAYER_KEY.
+     * @param {"idle"|"loading"|"success"|"error"|"cooldown"} status UI state to render.
+     * @param {string} [message] Accessible detail shown for success or error.
+     * @param {number} [cooldownSeconds=0] Server-provided retry delay.
+     * @see applyCallKbiButtonState
+     * @see sendReport
+     */
+    function setCallKbiButtonState(
+        playerKey,
+        status,
+        message = "",
+        cooldownSeconds = 0,
+        errorDurationMs = 5000
+    ) {
+        const key = String(playerKey);
+        const existingTimer = callKbiButtonTimers.get(key);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+            callKbiButtonTimers.delete(key);
+        }
+        const state = status === "idle" ? null : {
+            status,
+            message,
+            ...(status === "cooldown"
+                ? { cooldownUntil: Date.now() + cooldownSeconds * 1000 }
+                : {}),
+        };
+        if (state) callKbiButtonStates.set(key, state);
+        else callKbiButtonStates.delete(key);
+        shadow.querySelectorAll(".call-kbi").forEach((button) => {
+            if (button.dataset.callPlayerKey === key) applyCallKbiButtonState(button, state);
+        });
+        if (status === "cooldown") {
+            const updateCooldown = () => {
+                if (callKbiButtonStates.get(key) !== state) return;
+                const secondsRemaining = Math.ceil((state.cooldownUntil - Date.now()) / 1000);
+                if (secondsRemaining <= 0) {
+                    setCallKbiButtonState(key, "idle");
+                    return;
+                }
+                shadow.querySelectorAll(".call-kbi").forEach((button) => {
+                    if (button.dataset.callPlayerKey === key) applyCallKbiButtonState(button, state);
+                });
+                callKbiButtonTimers.set(key, window.setTimeout(updateCooldown, Math.min(1000, state.cooldownUntil - Date.now())));
+            };
+            callKbiButtonTimers.set(key, window.setTimeout(updateCooldown, Math.min(1000, cooldownSeconds * 1000)));
+        } else if (status === "success" || status === "error") {
+            const timer = window.setTimeout(() => {
+                if (callKbiButtonStates.get(key) !== state) return;
+                callKbiButtonStates.delete(key);
+                callKbiButtonTimers.delete(key);
+                shadow.querySelectorAll(".call-kbi").forEach((button) => {
+                    if (button.dataset.callPlayerKey === key) applyCallKbiButtonState(button, null);
+                });
+            }, status === "success" ? 2600 : errorDurationMs);
+            callKbiButtonTimers.set(key, timer);
+        }
+    }
+
+    /**
+     * Prepare the shared report API payload for a player call or a room-level call.
+     * If no valid current room URL exists, preserve the player selection and request one.
+     * @param {object|null} player Selected roster player, or null for a room-level call.
+     * @param {string} [roomLink] Current match URL or a manually supplied room URL.
+     * @param {{requireDetectedRoom?: boolean}} [options] Whether a missing room should notify in-game instead of opening the link dialog.
+     * @see openMenuCallLinkDialog
+     * @see openVerificationDialog
+     * @see sendReport
+     */
+    function startKbiCall(player, roomLink = getCurrentReportSessionLink(), options = {}) {
+        const key = player ? String(player.key) : MENU_CALL_PLAYER_KEY;
+        if (captchaInProgress || reportSubmitting ||
+            ["loading", "cooldown"].indexOf(
+                callKbiButtonStates.get(key) && callKbiButtonStates.get(key).status
+            ) !== -1) return;
+        if (player && (!reportMatchState.active ||
+            ![...reportMatchState.players.values()].some((entry) => String(entry.key) === key))) {
+            const message = "This player is no longer in the current match.";
+            setCallKbiButtonState(key, "error", message);
+            showUnityReportNotification(`<color=#ed3434>${message}</color>`);
+            return;
+        }
+        const parsedSessionLink = parseReportSessionLink(roomLink);
+        if (!parsedSessionLink) {
+            if (options.requireDetectedRoom) {
+                const message = "Join a Kour match before calling KBI.";
+                setCallKbiButtonState(key, "error", message, 0, 1800);
+                showUnityReportNotification(`<color=#ed3434>${message}</color>`);
+                return;
+            }
+            openMenuCallLinkDialog(player);
+            return;
+        }
+        pendingReportPayload = {
+            reporter: getReportIdentity().reporter || "Not detected",
+            target: player ? (player.name || "Unknown player") : "No player selected",
+            reason: "This user is calling KBI",
+            roomId: parsedSessionLink.roomId,
+            sessionLink: parsedSessionLink.url.href,
+        };
+        setCallKbiButtonState(key, "loading");
+        void openVerificationDialog(key);
+    }
+
+    /**
      * Safely render a status prefix and message as text nodes.
      * @see setReportFormStatus
      * @see setVerificationStatus
@@ -2260,7 +3093,10 @@
         const text = document.createElement("span");
         text.className = "status-message";
         text.textContent = message;
-        element.replaceChildren(prefix, document.createTextNode(" "), text);
+        while (element.firstChild) element.removeChild(element.firstChild);
+        element.appendChild(prefix);
+        element.appendChild(document.createTextNode(" "));
+        element.appendChild(text);
     }
 
     /**
@@ -2278,7 +3114,9 @@
             }
         }
         captchaWidgetId = null;
-        verificationWidget.replaceChildren();
+        while (verificationWidget.firstChild) {
+            verificationWidget.removeChild(verificationWidget.firstChild);
+        }
     }
 
     /**
@@ -2289,7 +3127,9 @@
      */
     function resetReportCaptcha() {
         captchaInProgress = false;
+        captchaAttemptId += 1;
         pendingReportPayload = null;
+        pendingCallPlayerKey = null;
         hidePopup(verificationLayer);
         removeCaptchaWidget();
         verificationStatus.textContent = "";
@@ -2335,54 +3175,89 @@
     }
 
     /**
-     * Obtain a Turnstile token before allowing the pending report to be sent.
+     * Gate either report type on Turnstile and submit only from its token callback.
+     * The attempt ID invalidates callbacks from a canceled or superseded widget.
+     * @param {string|null} [callPlayerKey] KBI button key, or null for a manual report.
      * @see loadCaptchaApi
      * @see sendReport
      * @see resetReportCaptcha
      */
-    async function openVerificationDialog() {
+    async function openVerificationDialog(callPlayerKey = null) {
         if (captchaInProgress) return;
+        const attemptId = captchaAttemptId + 1;
+        captchaAttemptId = attemptId;
         captchaInProgress = true;
+        pendingCallPlayerKey = callPlayerKey;
         showPopup(verificationLayer);
         setVerificationStatus("Loading security check…");
         verificationCancelButton.focus();
 
         try {
             const turnstile = await loadCaptchaApi();
-            if (!captchaInProgress) return;
-            captchaWidgetId = turnstile.render(verificationWidget, {
+            if (!captchaInProgress || captchaAttemptId !== attemptId) return;
+            const renderedWidgetId = turnstile.render(verificationWidget, {
                 sitekey: "0x4AAAAAAFh9F7Gz7tkh9rAD",
                 theme: "dark",
                 callback: (token) => {
-                    if (!captchaInProgress || !token || !pendingReportPayload) return;
+                    if (!captchaInProgress || captchaAttemptId !== attemptId ||
+                        !token || !pendingReportPayload) return;
                     const payload = pendingReportPayload;
+                    const callKey = pendingCallPlayerKey;
                     hidePopup(verificationLayer);
                     removeCaptchaWidget();
                     captchaInProgress = false;
                     pendingReportPayload = null;
-                    void sendReport(payload, token);
+                    pendingCallPlayerKey = null;
+                    void sendReport(payload, token, callKey);
                 },
                 "expired-callback": () => {
-                    if (captchaInProgress) {
-                        setVerificationStatus("The security check expired. Please complete it again.", "error");
+                    if (captchaInProgress && captchaAttemptId === attemptId) {
+                        failVerification("The security check expired. Please try again.");
                     }
                 },
                 "error-callback": () => {
-                    if (captchaInProgress) {
-                        setVerificationStatus("The security check could not be completed. Close this dialog and try again.", "error");
+                    if (captchaInProgress && captchaAttemptId === attemptId) {
+                        failVerification("The security check could not be completed. Please try again.");
                     }
                 },
             });
+            if (!captchaInProgress || captchaAttemptId !== attemptId) {
+                if (renderedWidgetId !== null && renderedWidgetId !== undefined &&
+                    typeof turnstile.remove === "function") {
+                    try {
+                        turnstile.remove(renderedWidgetId);
+                    } catch (error) {
+                        console.error("[Kour Report] Failed to remove the security check widget:", error);
+                    }
+                }
+                return;
+            }
+            captchaWidgetId = renderedWidgetId;
             setVerificationStatus("Complete the security check to continue.");
         } catch (error) {
+            if (!captchaInProgress || captchaAttemptId !== attemptId) return;
             console.error("[Kour Report] Failed to initialize security verification:", error);
-            captchaInProgress = false;
-            pendingReportPayload = null;
-            removeCaptchaWidget();
-            setVerificationStatus(
-                error instanceof Error ? error.message : "The security check could not be loaded.",
-                "error"
-            );
+            const callKey = callPlayerKey;
+            resetReportCaptcha();
+            const message = error instanceof Error ? error.message : "The security check could not be loaded.";
+            if (callKey !== null) {
+                setCallKbiButtonState(callKey, "error", message);
+            } else {
+                setReportFormStatus(message, "error");
+                reportSubmitButton.focus();
+            }
+        }
+
+        function failVerification(message) {
+            if (!captchaInProgress || captchaAttemptId !== attemptId) return;
+            const callKey = pendingCallPlayerKey;
+            resetReportCaptcha();
+            if (callKey !== null) {
+                setCallKbiButtonState(callKey, "error", message);
+            } else {
+                setReportFormStatus(message, "error");
+                reportSubmitButton.focus();
+            }
         }
     }
 
@@ -2444,7 +3319,13 @@
     function parseReportSessionLink(value) {
         let sessionUrl;
         try {
-            sessionUrl = new URL(value.trim());
+            const trimmedValue = String(value || "").trim();
+            if (typeof URL === "function") {
+                sessionUrl = new URL(trimmedValue);
+            } else {
+                sessionUrl = document.createElement("a");
+                sessionUrl.href = trimmedValue;
+            }
         } catch {
             return null;
         }
@@ -2531,10 +3412,17 @@
     }
 
     function notifyUnityWhenReady(message) {
+        const maxAttempts = 60;
+        let attempts = 0;
         const tryNotify = () => {
             const gameWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
             const gameInstance = gameWindow.unityInstance || window.unityInstance;
             if (!gameInstance || typeof gameInstance.SendMessage !== "function") {
+                attempts += 1;
+                if (attempts >= maxAttempts) {
+                    console.warn("[Kour Report] Unity did not become ready in time; its update notification was skipped.");
+                    return;
+                }
                 window.setTimeout(tryNotify, 1000);
                 return;
             }
@@ -2543,26 +3431,80 @@
         tryNotify();
     }
 
+    /**
+     * Request a userscript resource through whichever cross-manager API is available.
+     * The legacy callback API remains the preferred path for older Tampermonkey versions.
+     * @param {object} details Request URL, timeout, and response callbacks.
+     * @returns {Promise<{status: number, responseText: string}>} HTTP status and response body.
+     */
+    function requestUserscriptResource(details) {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            let timeoutId = null;
+            const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                if (timeoutId !== null) window.clearTimeout(timeoutId);
+                callback(value);
+            };
+            const requestDetails = {
+                ...details,
+                onload: (response) => finish(resolve, response),
+                onerror: () => finish(reject, new Error("Network request failed.")),
+                ontimeout: () => finish(reject, new Error("The version check timed out.")),
+            };
+
+            try {
+                if (typeof GM_xmlhttpRequest === "function") {
+                    GM_xmlhttpRequest(requestDetails);
+                    return;
+                }
+                if (typeof GM !== "undefined" &&
+                    GM && typeof GM.xmlHttpRequest === "function") {
+                    const request = GM.xmlHttpRequest(requestDetails);
+                    if (request && typeof request.then === "function") {
+                        request.then(
+                            (response) => finish(resolve, response),
+                            (error) => finish(reject, error)
+                        );
+                    }
+                    return;
+                }
+                if (typeof fetch !== "function") {
+                    finish(reject, new Error("No supported cross-origin request API is available."));
+                    return;
+                }
+
+                if (Number.isFinite(details.timeout) && details.timeout > 0) {
+                    timeoutId = window.setTimeout(
+                        () => finish(reject, new Error("The version check timed out.")),
+                        details.timeout
+                    );
+                }
+                fetch(details.url, { cache: "no-store" }).then((response) =>
+                    response.text().then((responseText) => finish(resolve, {
+                        status: response.status,
+                        responseText,
+                    }))
+                ).catch((error) => finish(reject, error));
+            } catch (error) {
+                finish(reject, error);
+            }
+        });
+    }
+
     async function checkForUpdates() {
         let updateManifest;
         try {
-            const manifestText = await new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: "GET",
-                    url: `${VERSION_URL}?check=${Date.now()}`,
-                    timeout: 10000,
-                    onload: (response) => {
-                        if (response.status !== 200) {
-                            reject(new Error(`Version check failed with HTTP ${response.status}.`));
-                            return;
-                        }
-                        resolve(response.responseText);
-                    },
-                    onerror: () => reject(new Error("Network request failed.")),
-                    ontimeout: () => reject(new Error("The version check timed out.")),
-                });
+            const response = await requestUserscriptResource({
+                method: "GET",
+                url: `${VERSION_URL}?check=${Date.now()}`,
+                timeout: 10000,
             });
-            updateManifest = JSON.parse(manifestText);
+            if (response.status !== 200) {
+                throw new Error(`Version check failed with HTTP ${response.status}.`);
+            }
+            updateManifest = JSON.parse(response.responseText);
         } catch (error) {
             console.warn("[Kour Report] Could not check for userscript updates:", error);
             return;
@@ -2606,7 +3548,7 @@
         resetReportCaptcha();
         manualReport = isManual;
         reportedPlayerKey = isManual ? null : player.key;
-        reportDialogTitle.replaceChildren();
+        reportDialogTitle.textContent = "";
         if (isManual) {
             reportDialogTitle.textContent = "Manual report";
             reportDialogTitle.title = "Manual report";
@@ -2617,7 +3559,6 @@
         reportDialogLayer.querySelector(".report-dialog-subtitle").textContent = isManual
             ? "Enter the player's name and report details"
             : "Confirm the player and report details";
-        reportTarget.readOnly = !isManual;
         reportTarget.required = !isManual;
         reportTargetHelp.hidden = !isManual;
         manualReportHelpTooltip.hidden = true;
@@ -2800,12 +3741,13 @@
             [...playerList.children].map((row) => row.dataset.playerKey)
         );
         emptyState.hidden = hasReportablePlayers;
-        manualReportRow.hidden = !hasReportablePlayers;
-        (hasReportablePlayers ? manualReportRow : emptyState).appendChild(manualReportButton);
-        emptyStateMessage.textContent = active
-            ? "No players were detected. The room may be empty, or player detection may have failed. We recommend submitting a manual report."
-            : "Join a match to see players available to report, or use Report manually below.";
-        playerList.replaceChildren();
+        if (hasReportablePlayers) {
+            emptyState.parentNode.insertBefore(menuReportActions, emptyState.nextSibling);
+        } else {
+            emptyState.appendChild(menuReportActions);
+        }
+        emptyStateMessage.textContent = "The player list is unavailable right now. If you're in a match, match detection may not be working. You can still submit a manual report.";
+        while (playerList.firstChild) playerList.removeChild(playerList.firstChild);
         playerList.style.maxHeight = "";
         reportablePlayers.forEach((player) => {
             const row = document.createElement("div");
@@ -2840,13 +3782,35 @@
             reportButton.textContent = "Report";
             reportButton.addEventListener("click", () => openReportDialog(player));
             addButtonPressAnimation(reportButton);
-            actions.append(reportButton);
+            const callButton = document.createElement("button");
+            callButton.type = "button";
+            callButton.className = "player-action call-kbi";
+            callButton.dataset.callPlayerKey = player.key;
+            callButton.dataset.playerName = player.name;
+            const callIcon = document.createElement("span");
+            callIcon.className = "call-kbi-icon";
+            callIcon.setAttribute("aria-hidden", "true");
+            const callLabel = document.createElement("span");
+            callLabel.className = "call-kbi-label";
+            callButton.append(callIcon, callLabel);
+            callButton.addEventListener("click", () => startKbiCall(player));
+            addButtonPressAnimation(callButton);
+            applyCallKbiButtonState(callButton, callKbiButtonStates.get(String(player.key)) || null);
+            actions.append(reportButton, callButton);
             row.append(avatar, info, actions);
             playerList.appendChild(row);
         });
         updatePlayerListHeight();
     }
 
+    applyCallKbiButtonState(
+        menuCallKbiButton,
+        callKbiButtonStates.get(MENU_CALL_PLAYER_KEY) || null
+    );
+    applyCallKbiButtonState(
+        launcherQuickCall,
+        callKbiButtonStates.get(MENU_CALL_PLAYER_KEY) || null
+    );
     onReportMatchPlayersUpdated = (active, players) => renderPlayers(active, players);
     window.addEventListener("hashchange", updateOpenManualReportSessionLink);
     notifyReportMatchPlayers();
@@ -2876,8 +3840,9 @@
             exitTimers.set(panel, timer);
         }
         panel.setAttribute("aria-hidden", String(!open));
+        updateLauncherQuickCallPosition();
         if (open) {
-            playerList.replaceChildren();
+            while (playerList.firstChild) playerList.removeChild(playerList.firstChild);
             playerList.style.maxHeight = "";
             renderedPlayersSignature = null;
             notifyReportMatchPlayers();
@@ -2893,6 +3858,108 @@
     });
     closeButton.addEventListener("click", () => setOpen(false));
     manualReportButton.addEventListener("click", () => openReportDialog(null, true));
+    /**
+     * Ask for a room URL while retaining an optional player target for submission.
+     * @param {object|null} player Selected roster player, or null for a room call.
+     * @see startKbiCall
+     * @see parseReportSessionLink
+     */
+    function openMenuCallLinkDialog(player) {
+        pendingMenuCallPlayer = player || null;
+        menuCallLinkForm.reset();
+        menuCallLinkStatus.hidden = true;
+        menuCallLinkStatus.removeAttribute("data-kind");
+        showPopup(menuCallLinkLayer);
+        menuCallRoomLinkInput.focus();
+    }
+
+    function focusCallKbiButton(playerKey) {
+        const buttons = shadow.querySelectorAll(".call-kbi");
+        for (let index = 0; index < buttons.length; index += 1) {
+            if (buttons[index].dataset.callPlayerKey === String(playerKey) &&
+                !buttons[index].disabled) {
+                buttons[index].focus();
+                return;
+            }
+        }
+        menuCallKbiButton.focus();
+    }
+
+    /**
+     * Use the detected room URL when available; otherwise request it from the user.
+     * @see openMenuCallLinkDialog
+     * @see startKbiCall
+     */
+    function continueMenuCallRoom() {
+        const currentSessionLink = getCurrentReportSessionLink();
+        if (parseReportSessionLink(currentSessionLink)) {
+            startKbiCall(null, currentSessionLink);
+            return;
+        }
+        openMenuCallLinkDialog(null);
+    }
+
+    menuCallKbiButton.addEventListener("click", () => {
+        const hasSelectablePlayers = reportMatchState.active &&
+            [...reportMatchState.players.values()].some((player) =>
+                !player.local &&
+                (reportMatchState.localId === null ||
+                    String(player.key) !== String(reportMatchState.localId))
+            );
+        if (hasSelectablePlayers) {
+            showPopup(menuCallWarningLayer);
+            menuCallWarningContinueButton.focus();
+            return;
+        }
+        continueMenuCallRoom();
+    });
+    menuCallWarningContinueButton.addEventListener("click", () => {
+        hidePopup(menuCallWarningLayer);
+        continueMenuCallRoom();
+    });
+    menuCallWarningChooseButton.addEventListener("click", () => {
+        hidePopup(menuCallWarningLayer);
+        const firstCallButton = playerList.querySelector(".player-row .call-kbi");
+        if (firstCallButton && !firstCallButton.disabled) firstCallButton.focus();
+        else menuCallKbiButton.focus();
+    });
+    menuCallWarningLayer.addEventListener("click", (event) => {
+        if (event.target !== menuCallWarningLayer) return;
+        hidePopup(menuCallWarningLayer);
+        menuCallKbiButton.focus();
+    });
+    menuCallLinkCancelButton.addEventListener("click", () => {
+        const pendingPlayer = pendingMenuCallPlayer;
+        pendingMenuCallPlayer = null;
+        hidePopup(menuCallLinkLayer);
+        focusCallKbiButton(pendingPlayer ? pendingPlayer.key : MENU_CALL_PLAYER_KEY);
+    });
+    menuCallLinkLayer.addEventListener("click", (event) => {
+        if (event.target !== menuCallLinkLayer) return;
+        const pendingPlayer = pendingMenuCallPlayer;
+        pendingMenuCallPlayer = null;
+        hidePopup(menuCallLinkLayer);
+        focusCallKbiButton(pendingPlayer ? pendingPlayer.key : MENU_CALL_PLAYER_KEY);
+    });
+    menuCallLinkForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const parsedSessionLink = parseReportSessionLink(menuCallRoomLinkInput.value);
+        if (!parsedSessionLink) {
+            renderStatusMessage(
+                menuCallLinkStatus,
+                "Enter a valid Kour room link with a room ID, or join a match first.",
+                "error"
+            );
+            menuCallLinkStatus.dataset.kind = "error";
+            menuCallLinkStatus.hidden = false;
+            menuCallRoomLinkInput.focus();
+            return;
+        }
+        const pendingPlayer = pendingMenuCallPlayer;
+        pendingMenuCallPlayer = null;
+        hidePopup(menuCallLinkLayer);
+        startKbiCall(pendingPlayer, parsedSessionLink.url.href);
+    });
     shadow.querySelector(".cancel-report").addEventListener("click", closeReportDialog);
     reportDialogLayer.addEventListener("click", (event) => {
         if (event.target === reportDialogLayer && !reportSubmitting) closeReportDialog();
@@ -2904,11 +3971,17 @@
             setReasonMenuOpen(false);
         }
     });
-    verificationCancelButton.addEventListener("click", () => {
+    function cancelVerification() {
+        const callKey = pendingCallPlayerKey;
         resetReportCaptcha();
+        if (callKey !== null) {
+            setCallKbiButtonState(callKey, "error", "The KBI call was canceled.");
+            return;
+        }
         setReportFormStatus("Security check canceled. Press Send report to try again.", "info");
         reportSubmitButton.focus();
-    });
+    }
+    verificationCancelButton.addEventListener("click", cancelVerification);
     // Validate the selected player and report details before starting verification.
     // @see getReportIdentity
     // @see openVerificationDialog
@@ -2961,11 +4034,23 @@
      * @see openVerificationDialog
      * @see showUnityReportNotification
      */
-    async function sendReport(payload, verificationToken) {
+    async function sendReport(payload, verificationToken, callPlayerKey = null) {
         reportSubmitting = true;
-        reportSubmitButton.disabled = true;
-        reportCancelButton.disabled = true;
-        setReportFormStatus("Sending report…", "info");
+        if (callPlayerKey === null) {
+            reportSubmitButton.disabled = true;
+            reportCancelButton.disabled = true;
+            setReportFormStatus("Sending report…", "info");
+        }
+        const playerCount = reportMatchState.active && reportMatchState.localId !== null
+            ? reportMatchState.players.size + 1
+            : null;
+        const playerCountLabel = playerCount === null
+            ? "not detected"
+            : String(playerCount);
+        const reportPayload = {
+            ...payload,
+            reason: `${payload.reason} [Players in match: ${playerCountLabel}]`,
+        };
         try {
             const response = await fetch(
                 "https://kour-report-api.kourkbi.workers.dev/api/report",
@@ -2975,7 +4060,7 @@
                     credentials: "include",
                     body: JSON.stringify({
                         turnstileToken: verificationToken,
-                        ...payload,
+                        ...reportPayload,
                     }),
                 }
             );
@@ -3009,8 +4094,13 @@
                 responseData?.success !== false &&
                 responseData?.message === "Report submitted successfully.";
             if (reportSucceeded) {
-                showUnityReportNotification("<color=#4CAF50>Report sent successfully!</color>");
-                setReportFormStatus(responseData.message, "success");
+                if (callPlayerKey !== null) {
+                    setCallKbiButtonState(callPlayerKey, "success", "KBI call sent successfully.");
+                    showUnityReportNotification("<color=#4CAF50>KBI call sent successfully!</color>");
+                } else {
+                    showUnityReportNotification("<color=#4CAF50>Report sent successfully!</color>");
+                    setReportFormStatus(responseData.message, "success");
+                }
             } else {
                 const retryAfterSeconds = responseData?.code === "KOUR_REPORT_API_REPORT_COOLDOWN"
                     ? getRetryAfterSeconds(response)
@@ -3018,18 +4108,39 @@
                 const retryMessage = retryAfterSeconds === null
                     ? ""
                     : ` Please try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}.`;
-                setReportFormStatus(
-                    limitServerResponse(
-                        `${serverMessage || `No response body received (HTTP ${response.status}).`}${retryMessage}`
-                    ),
-                    "error",
-                    "Server response:"
+                const errorMessage = limitServerResponse(
+                    `${serverMessage || `No response body received (HTTP ${response.status}).`}${retryMessage}`
                 );
+                if (callPlayerKey !== null) {
+                    if (responseData?.code === "KOUR_REPORT_API_REPORT_COOLDOWN" &&
+                        retryAfterSeconds !== null && retryAfterSeconds > 0) {
+                        setCallKbiButtonState(
+                            callPlayerKey,
+                            "cooldown",
+                            errorMessage,
+                            retryAfterSeconds
+                        );
+                        showUnityReportNotification(
+                            `<color=#f4c842>KBI call cooldown: try again in ${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}.</color>`
+                        );
+                    } else {
+                        setCallKbiButtonState(callPlayerKey, "error", errorMessage);
+                        showUnityReportNotification(`<color=#ed3434>${errorMessage}</color>`);
+                    }
+                } else {
+                    setReportFormStatus(errorMessage, "error", "Server response:");
+                }
             }
         } catch (error) {
             console.error("[Kour Report] Failed to submit report:", error);
             const message = error instanceof Error ? error.message : String(error);
-            setReportFormStatus(`Unable to send the report. ${message}`);
+            if (callPlayerKey !== null) {
+                const errorNotice = `Unable to send the KBI call. ${message}`;
+                setCallKbiButtonState(callPlayerKey, "error", errorNotice);
+                showUnityReportNotification(`<color=#ed3434>${errorNotice}</color>`);
+            } else {
+                setReportFormStatus(`Unable to send the report. ${message}`);
+            }
         } finally {
             resetReportCaptcha();
             reportSubmitting = false;
@@ -3076,6 +4187,11 @@
             }
             return;
         }
+        if (launcherShortcutActive && event.key === "Escape") {
+            event.preventDefault();
+            finishLauncherShortcutWheel(false);
+            return;
+        }
         if (event.key === "Escape" && !settingsLayer.hidden) {
             closeSettingsDialog();
             return;
@@ -3090,10 +4206,20 @@
             infoButton.focus();
             return;
         }
+        if (event.key === "Escape" && !menuCallLinkLayer.hidden) {
+            const pendingPlayer = pendingMenuCallPlayer;
+            pendingMenuCallPlayer = null;
+            hidePopup(menuCallLinkLayer);
+            focusCallKbiButton(pendingPlayer ? pendingPlayer.key : MENU_CALL_PLAYER_KEY);
+            return;
+        }
+        if (event.key === "Escape" && !menuCallWarningLayer.hidden) {
+            hidePopup(menuCallWarningLayer);
+            menuCallKbiButton.focus();
+            return;
+        }
         if (event.key === "Escape" && !verificationLayer.hidden) {
-            resetReportCaptcha();
-            setReportFormStatus("Security check canceled. Press Send report to try again.", "info");
-            reportSubmitButton.focus();
+            cancelVerification();
             return;
         }
         if (event.key === "Escape" && !reportDialogLayer.hidden) {
@@ -3109,22 +4235,48 @@
             setOpen(false);
             return;
         }
+        if (launcherShortcutActive) return;
         if (event.repeat || isTextEntry(event) || !settingsLayer.hidden) return;
         if (matchesKey(event, launcherSettings.toggleIconKey)) {
             event.preventDefault();
-            launcherSettings.hideIcon = !launcherSettings.hideIcon;
+            launcherSettings.hideBothButtons = !launcherSettings.hideBothButtons;
             applyLauncherSettings();
             persistLauncherSettings();
             return;
         }
         if (matchesOpenKey(event)) {
             event.preventDefault();
-            setOpen(!panel.classList.contains("open"));
+            if (launcherSettings.openKey === "Alt" ||
+                launcherSettings.openKey === "AltLeft" ||
+                launcherSettings.openKey === "AltRight") {
+                beginLauncherShortcutWheel();
+            } else {
+                setOpen(!panel.classList.contains("open"));
+            }
         }
     }, true);
 
+    document.addEventListener("keyup", (event) => {
+        if (!launcherShortcutActive || !matchesOpenKey(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        finishLauncherShortcutWheel(true);
+    }, true);
+
+    document.addEventListener("pointermove", (event) => {
+        if (launcherShortcutActive) {
+            updateLauncherShortcutSelection(event.clientX, event.clientY);
+        }
+    }, true);
+
+    window.addEventListener("blur", () => {
+        finishLauncherShortcutWheel(false);
+    });
+
     window.addEventListener("resize", () => {
         updatePlayerListHeight();
+        updateLauncherQuickCallPosition();
+        if (launcherShortcutActive) positionLauncherShortcutWheel();
         if (!manualReportHelpTooltip.hidden) positionManualReportHelpTooltip();
         if (launcherSettings.left === null || launcherSettings.top === null) return;
         applyLauncherSettings();
