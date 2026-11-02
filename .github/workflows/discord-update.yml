@@ -1,0 +1,95 @@
+name: Kour Report Discord Announcement
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'version.json'
+
+permissions:
+  contents: read
+
+jobs:
+  discord:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read version information
+        id: version
+        run: |
+          VERSION=$(jq -er '.version | strings | select(length > 0)' version.json)
+          DETAILS=$(jq -er '.details | strings | select(length > 0)' version.json)
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "details<<EOF"
+            printf '%s\n' "$DETAILS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send Discord announcement
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DETAILS: ${{ steps.version.outputs.details }}
+
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg version "$VERSION" \
+            --arg details "$DETAILS" \
+            '{
+              embeds: [{
+                title: ("Kour Report v" + $version),
+
+                description: "A new version of Kour Report is now available!",
+
+                color: 5944155,
+
+                fields: [
+                  {
+                    name: "Version",
+                    value: $version,
+                    inline: true
+                  },
+                  {
+                    name: "What'\''s New",
+                    value: $details,
+                    inline: false
+                  },
+                  {
+                    name: "Repository",
+                    value: "[GitHub](https://github.com/kourkbi/kour-report)",
+                    inline: true
+                  },
+                  {
+                    name: "Install / Update",
+                    value: "[Greasy Fork](https://greasyfork.org/scripts/602206-kour-report)",
+                    inline: true
+                  }
+                ],
+
+                image: {
+                  url: "https://i.ibb.co/MDB7QbFX/kourkbi-updates.jpg"
+                },
+
+                footer: {
+                  text: "Kour Report"
+                },
+
+                timestamp: (now | todateiso8601)
+              }],
+
+              allowed_mentions: {
+                parse: []
+              }
+            }')
+
+          curl --fail-with-body \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK"
