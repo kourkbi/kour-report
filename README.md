@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/kourkbi-report-script-banner.jpg" alt="Kour Report banner: report hackers to the KBI" width="100%">
+</p>
+
 <h1 align="center">Kour Report</h1>
 
 <p align="center">
