@@ -139,7 +139,7 @@ The room link is filled in automatically when a room ID is detected. In the lobb
 
 Join the KBI Discord to discuss the project and reports:
 
-[![Join the KBI Discord](https://img.shields.io/badge/Discord-Join%20KBI-5865F2?logo=discord&logoColor=white)](https://discord.gg/z9rwU6pcUP)
+[![Join the KBI Discord](https://img.shields.io/badge/Discord-Join%20KBI-5865F2?logo=discord&logoColor=white)](https://discord.gg/Ke3a7ZZWMd)
 
 ## 📄 License
 

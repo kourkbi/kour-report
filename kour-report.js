@@ -2,7 +2,7 @@
 // @name         Kour Report
 // @namespace    https://kour.io/
 // @version      1.0.5
-// @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/z9rwU6pcUP
+// @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/Ke3a7ZZWMd
 // @author       kourkbi
 // @license      MIT
 // @homepageURL  https://github.com/kourkbi/kour-report
@@ -24,7 +24,7 @@
     "use strict";
 
     const PLAYER_AVATAR = "https://raw.githubusercontent.com/kourkbi/kour-report/main/assets/menu/player-avatar.jpg";
-    const DISCORD_URL = "https://discord.gg/z9rwU6pcUP";
+    const DISCORD_URL = "https://discord.gg/Ke3a7ZZWMd";
 
     /***************************************
      * Match Detection

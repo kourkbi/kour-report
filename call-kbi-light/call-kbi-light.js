@@ -2,7 +2,7 @@
 // @name         Call KBI Light
 // @namespace    https://kour.io/
 // @version      1.0.0
-// @description  Lightweight KBI call requests for Kour.io. Join the KBI Discord: https://discord.gg/z9rwU6pcUP
+// @description  Lightweight KBI call requests for Kour.io. Join the KBI Discord: https://discord.gg/Ke3a7ZZWMd
 // @author       kourkbi
 // @license      MIT
 // @icon         https://raw.githubusercontent.com/kourkbi/kour-report/main/assets/menu/light/call-kbi-light-icon.png
