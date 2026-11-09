@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      1.0.6
+// @version      1.0.7
 // @description  In-game player reporting tool for Kour.io. Join the KBI Discord: https://discord.gg/Ke3a7ZZWMd
 // @author       kourkbi
 // @license      MIT
@@ -524,6 +524,7 @@
     const WINDOW_SIZE_SCALE = 1.08;
     const MAX_REPORT_REASON_LENGTH = 250;
     const MAX_SERVER_RESPONSE_LENGTH = 1200;
+    const REPORT_REMINDER_DURATION_MS = 20000;
     const UI_COLORS = Object.freeze({
         white: "#fff",
         ink: "#111",
@@ -1142,6 +1143,7 @@
                 from { opacity: 0; transform: translateY(3px); }
                 to { opacity: 1; transform: translateY(0); }
             }
+            .room-full-report-tooltip { z-index: 21; }
             .settings-checkbox {
                 display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-content: center;
                 appearance: none; border: 1px solid var(--color-control-highlight); border-radius: var(--radius-control);
@@ -1509,6 +1511,36 @@
             .report-form-status::-webkit-scrollbar-track { background: transparent; }
             .report-form-status::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
             .report-form-status[hidden] { display: none; }
+            .report-reminder-toast {
+                position: fixed; z-index: 20; top: max(16px, env(safe-area-inset-top)); left: 50%;
+                width: min(520px, calc(100vw - 24px)); padding: 14px 16px 18px; overflow: hidden;
+                border: 1px solid var(--color-border-dialog); border-radius: var(--radius-large);
+                color: var(--color-text-description); background: var(--color-menu-header); box-shadow: var(--shadow-dialog);
+                font: 700 14px/1.45 var(--font-decorative); letter-spacing: -.1px;
+                text-align: left; text-shadow: 0 1px 1px var(--color-shadow);
+                transform: translateX(-50%); pointer-events: none;
+            }
+            .report-reminder-toast[hidden] { display: none; }
+            .report-reminder-toast strong {
+                display: block; margin-bottom: 4px; color: var(--color-text-heading);
+                font: 800 15px/1.35 var(--font-ui);
+            }
+            .report-reminder-toast p { margin: 0; }
+            .report-reminder-progress {
+                position: absolute; right: 0; bottom: 0; left: 0; height: 3px;
+                background: #ffffff12;
+            }
+            .report-reminder-progress-fill {
+                display: block; width: 100%; height: 100%;
+                background: var(--gradient-report); transform-origin: right center;
+            }
+            .report-reminder-progress-fill.is-running {
+                animation: report-reminder-countdown ${REPORT_REMINDER_DURATION_MS}ms linear forwards;
+            }
+            @keyframes report-reminder-countdown {
+                from { transform: scaleX(1); }
+                to { transform: scaleX(0); }
+            }
             @media (max-width: 560px) {
                 .panel { padding: 12px; }
                 .main { max-height: calc(100vh - 24px); }
@@ -1844,6 +1876,14 @@
                 </div>
             </section>
         </div>
+        <div class="report-reminder-toast" role="status" aria-live="polite" hidden>
+            <strong>KBI Report Reminder</strong>
+            <p>If the room is full, please keep submitting reports or try again when fewer than 6 players are in the room. If the room allows more than 6 players, please continue submitting reports.</p>
+            <div class="report-reminder-progress" aria-hidden="true">
+                <span class="report-reminder-progress-fill"></span>
+            </div>
+        </div>
+        <div class="tooltip room-full-report-tooltip" role="tooltip" hidden>If the room is full, please keep submitting reports so staff can see when the session becomes available. Staff will try to join; please continue sending reports until they connect to the session.</div>
     `;
 
     const launcher = document.createElement("button");
@@ -2099,9 +2139,11 @@
         placeItems: "center",
         boxSizing: "border-box",
         borderRadius: "50%",
+        border: "1px solid #171717",
         color: "#fff",
         background: "#f01444",
         font: "800 13px/1 Arial, sans-serif",
+        boxShadow: "0 1px 2px #0008",
         pointerEvents: "none",
     });
     launcher.appendChild(launcherIcon);
@@ -2185,6 +2227,9 @@
     const reportSubmitButton = reportForm.querySelector('button[type="submit"]');
     const reportCancelButton = shadow.querySelector(".cancel-report");
     const reportDialogAvatar = shadow.querySelector(".report-dialog-avatar");
+    const reportReminderToast = shadow.querySelector(".report-reminder-toast");
+    const reportReminderProgress = shadow.querySelector(".report-reminder-progress-fill");
+    const roomFullReportTooltip = shadow.querySelector(".room-full-report-tooltip");
     const verificationLayer = shadow.querySelector(".verification-layer");
     const verificationWidget = shadow.querySelector(".verification-widget");
     const verificationStatus = shadow.querySelector(".verification-status");
@@ -2206,6 +2251,8 @@
     // Per-target UI state lets each player button and the room button show independent results.
     const callKbiButtonStates = new Map();
     const callKbiButtonTimers = new Map();
+    const shownReportReminderKeys = new Set();
+    let reportReminderTimer = 0;
     const exitTimers = new WeakMap();
     let heldPressButton = null;
     let heldPressControl = null;
@@ -2888,6 +2935,85 @@
         renderStatusMessage(reportFormStatus, message, kind, prefixText);
         reportFormStatus.dataset.kind = kind;
         reportFormStatus.hidden = false;
+    }
+
+    function getDetectedRoomPlayerCount() {
+        return reportMatchState.active && reportMatchState.localId !== null
+            ? reportMatchState.players.size + 1
+            : null;
+    }
+
+    function positionRoomFullReportTooltip(button) {
+        const margin = 12;
+        const offset = 8;
+        const buttonBounds = button.getBoundingClientRect();
+        const bounds = roomFullReportTooltip.getBoundingClientRect();
+        const left = buttonBounds.left + (buttonBounds.width - bounds.width) / 2;
+        const top = buttonBounds.top - bounds.height - offset;
+        roomFullReportTooltip.style.left = `${Math.max(margin, Math.min(left, window.innerWidth - bounds.width - margin))}px`;
+        roomFullReportTooltip.style.top = `${Math.max(margin, top)}px`;
+    }
+
+    function getReportActionButton(target) {
+        if (!(target instanceof Element)) return null;
+        return target.closest(
+            ".player-action.call-kbi, .player-action.report, .manual-report-button, " +
+            ".menu-call-kbi, .report-form button[type='submit']"
+        );
+    }
+
+    function showRoomFullReportTooltip(button) {
+        if (!button || button.disabled || (getDetectedRoomPlayerCount() || 0) < 6) {
+            roomFullReportTooltip.hidden = true;
+            return;
+        }
+        roomFullReportTooltip.hidden = false;
+        positionRoomFullReportTooltip(button);
+    }
+
+    shadow.addEventListener("pointerover", (event) => {
+        const button = getReportActionButton(event.target);
+        if (!button) return;
+        showRoomFullReportTooltip(button);
+    });
+    shadow.addEventListener("pointerout", (event) => {
+        const button = getReportActionButton(event.target);
+        if (!button || (event.relatedTarget instanceof Node && button.contains(event.relatedTarget))) return;
+        roomFullReportTooltip.hidden = true;
+    });
+    shadow.addEventListener("focusin", (event) => {
+        const button = getReportActionButton(event.target);
+        if (!button) return;
+        showRoomFullReportTooltip(button);
+    });
+    shadow.addEventListener("focusout", (event) => {
+        const button = getReportActionButton(event.target);
+        if (!button || (event.relatedTarget instanceof Node && button.contains(event.relatedTarget))) return;
+        roomFullReportTooltip.hidden = true;
+    });
+
+    function showReportReminderOnce(payload, callPlayerKey, reminderType) {
+        const isRoomCall = callPlayerKey === MENU_CALL_PLAYER_KEY;
+        const target = String(payload.target || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+        const reminderTarget = isRoomCall
+            ? "room"
+            : reminderType === "manual-report"
+                ? "manual-report"
+                : `player:${target}`;
+        const reminderKey = `${payload.roomId}:${reminderTarget}`;
+        if (shownReportReminderKeys.has(reminderKey)) return;
+        shownReportReminderKeys.add(reminderKey);
+
+        reportReminderToast.hidden = false;
+        window.clearTimeout(reportReminderTimer);
+        reportReminderProgress.classList.remove("is-running");
+        void reportReminderProgress.offsetWidth;
+        reportReminderProgress.classList.add("is-running");
+        reportReminderTimer = window.setTimeout(() => {
+            reportReminderToast.hidden = true;
+            reportReminderProgress.classList.remove("is-running");
+            reportReminderTimer = 0;
+        }, REPORT_REMINDER_DURATION_MS);
     }
 
     /**
@@ -3611,7 +3737,7 @@
     }
 
     reportDetails.addEventListener("input", updateCombinedReason);
-    [reportTarget, reportSessionLink, reportDetails].forEach((field) => {
+    [reportTarget, reportSessionLink, reportDetails, menuCallRoomLinkInput].forEach((field) => {
         field.addEventListener("focus", () => {
             reportTextFieldFocused = true;
         });
@@ -4020,6 +4146,7 @@
             reason,
             roomId: parsedSessionLink.roomId,
             sessionLink: parsedSessionLink.url.href,
+            reminderType: manualReport ? "manual-report" : "player-report",
         };
         reportFormStatus.hidden = true;
         void openVerificationDialog();
@@ -4041,14 +4168,13 @@
             reportCancelButton.disabled = true;
             setReportFormStatus("Sending report…", "info");
         }
-        const playerCount = reportMatchState.active && reportMatchState.localId !== null
-            ? reportMatchState.players.size + 1
-            : null;
+        const playerCount = getDetectedRoomPlayerCount();
         const playerCountLabel = playerCount === null
             ? "not detected"
             : String(playerCount);
+        const { reminderType, ...submissionPayload } = payload;
         const reportPayload = {
-            ...payload,
+            ...submissionPayload,
             reason: `${payload.reason} [Players in match: ${playerCountLabel}]`,
         };
         try {
@@ -4088,7 +4214,6 @@
             } else {
                 serverMessage = responseText.trim();
             }
-
             const reportSucceeded = response.status === 201 &&
                 responseData?.code === "KOUR_REPORT_API_REPORT_SUBMITTED" &&
                 responseData?.success !== false &&
@@ -4101,6 +4226,7 @@
                     showUnityReportNotification("<color=#4CAF50>Report sent successfully!</color>");
                     setReportFormStatus(responseData.message, "success");
                 }
+                showReportReminderOnce(reportPayload, callPlayerKey, reminderType);
             } else {
                 const retryAfterSeconds = responseData?.code === "KOUR_REPORT_API_REPORT_COOLDOWN"
                     ? getRetryAfterSeconds(response)

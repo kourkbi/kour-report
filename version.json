@@ -1,4 +1,4 @@
 {
-  "version": "1.0.6",
-  "details": "We’ve updated the Discord link, as the previous one expired."
+  "version": "1.0.7",
+  "details": "Added a room-full reminder tooltip to report and KBI buttons, improved reminder deduplication for manual reports and room calls, and fixed typing in the Call Room link field."
 }
