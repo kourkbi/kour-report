@@ -23,10 +23,6 @@
 
 The userscript is **[kour-report.js](./kour-report.js)**. Install this file to use the in-game reporting menu.
 
-### What's new in 1.0.5
-
-This release includes menu fixes and compatibility improvements, a redesigned in-game interface, expanded launcher settings, and the new **Call KBI** button for room and selected-player calls. The sections below describe how these features work.
-
 ## 🚀 Installation
 
 1. Install a userscript manager compatible with your browser, such as Tampermonkey or Violentmonkey.
