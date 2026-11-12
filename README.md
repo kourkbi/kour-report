@@ -5,7 +5,7 @@
 <h1 align="center">Kour Report</h1>
 
 <p align="center">
-  <a href="https://discord.gg/z9rwU6pcUP">
+  <a href="https://discord.gg/Ke3a7ZZWMd">
     <img src="https://img.shields.io/badge/Discord-Join%20KBI-5865F2?logo=discord&logoColor=white" alt="Join the KBI Discord">
   </a>
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License">
