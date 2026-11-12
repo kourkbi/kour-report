@@ -56,6 +56,8 @@ Build a simple, low-motion menu visually close to Call KBI Light:
 - The heading is `Call KBI`; do not add a subtitle above it. Include a short explanation, a labeled room URL input, a reserved Turnstile container, a glass-like `Continue` submit button with a small telephone icon, a glass-like close button, and an accessible live status message.
 - Use restrained typography similar to Verdana/Arial, readable contrast, responsive width, and a height that can scroll on small screens. Preserve visible keyboard focus and disabled-button state.
 - Put the host in a **closed Shadow DOM** so Kour.io page styles are less likely to affect the menu. Query UI elements from the shadow root, not from the page document.
+- Isolate menu interaction events from Kour.io gameplay. Install capture-phase guards on `window` (and, if needed, the menu's shadow root) for keyboard, pointer/mouse, touch, and wheel events whose composed path includes the menu host. Stop those events from propagating to the game, including keyboard events while typing, selecting text, or submitting the form. Do not call `preventDefault()` for ordinary input, focus, selection, clipboard, or form behavior; the menu controls must remain fully usable. Do not suppress events originating outside the menu.
+- Ensure clicking, focusing, typing in, or editing the room URL input never triggers the game's controls or gameplay actions. Check the `composedPath()`/host boundary rather than relying only on `event.target`, because the UI is inside a closed Shadow DOM.
 - Use inline SVG for the telephone icon; do not fetch icon fonts or add external UI libraries.
 - Use semantic buttons, a form, a label associated with the input, dialog labeling, and `role="status"`/`aria-live="polite"` for status.
 
@@ -144,8 +146,9 @@ Before finishing, confirm:
 
 1. The userscript metadata has the intended name, Kour.io match patterns, run-at mode, and only the grants it needs.
 2. The launcher, modal, glass-red styling, telephone icons, and requested controls are present.
-3. Automatic/manual room-link behavior, validation, reset, and hash-change handling match the requirements.
-4. Turnstile is lazy-loaded with the exact public sitekey and errors/expiry are handled.
-5. The payload and strict API-success checks match the contract above.
-6. No stale async callback can update a different menu/verification flow.
-7. JavaScript syntax validation passes. State clearly if real Tampermonkey/browser/API testing was not performed.
+3. Menu keyboard, pointer/mouse, touch, and wheel interactions do not reach the game, while normal text editing and form behavior remain intact.
+4. Automatic/manual room-link behavior, validation, reset, and hash-change handling match the requirements.
+5. Turnstile is lazy-loaded with the exact public sitekey and errors/expiry are handled.
+6. The payload and strict API-success checks match the contract above.
+7. No stale async callback can update a different menu/verification flow.
+8. JavaScript syntax validation passes. State clearly if real Tampermonkey/browser/API testing was not performed.
