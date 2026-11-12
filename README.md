@@ -23,6 +23,10 @@
 
 The userscript is **[kour-report.js](./kour-report.js)**. Install this file to use the in-game reporting menu.
 
+## 🔌 API Documentation
+
+Integrating with the report service? See the [Kour Report API documentation](./API-DOCUMENTATION.md) for endpoints, request fields, response codes, and examples.
+
 ## 🚀 Installation
 
 1. Install a userscript manager compatible with your browser, such as Tampermonkey or Violentmonkey.
