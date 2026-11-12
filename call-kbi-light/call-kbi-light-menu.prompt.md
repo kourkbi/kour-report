@@ -28,7 +28,7 @@ Include a standard metadata block at the top, adapting the script name/version/d
 // ==UserScript==
 // @name         Call KBI Light
 // @namespace    https://kour.io/
-// @version      1.0.0
+// @version      1.0.2
 // @description  Lightweight KBI call requests for Kour.io.
 // @author       kourkbi
 // @license      MIT
@@ -51,13 +51,15 @@ Include a standard metadata block at the top, adapting the script name/version/d
 Build a simple, low-motion menu visually close to Call KBI Light:
 
 - Add a fixed launcher at the right edge, vertically centered, approximately `64 × 64 px`, with rounded left corners, a red background (`#b92b32`), subtle shadow, white telephone line icon, and the label `Call KBI`. Keep the launcher compact; do not add distracting animation.
-- The launcher opens a centered modal overlay. Also support the `Alt` key as a toggle, ignoring key repeats; prevent the browser default only for this shortcut. `Escape`, the close button, and clicking the backdrop close the modal.
+- The launcher opens a centered modal overlay. Also support the `Alt` key as a toggle only when the room input is not focused, ignoring key repeats; prevent the browser default only for this shortcut. `Escape`, the close button, and clicking the backdrop close the modal.
 - Use a dark translucent overlay and a red-tinted glass card (roughly `475 px` maximum width), rounded corners, subtle border/shadow, and `backdrop-filter` with the `-webkit-backdrop-filter` fallback. Keep a readable fallback background if blur is unsupported.
 - The heading is `Call KBI`; do not add a subtitle above it. Include a short explanation, a labeled room URL input, a reserved Turnstile container, a glass-like `Continue` submit button with a small telephone icon, a glass-like close button, and an accessible live status message.
 - Use restrained typography similar to Verdana/Arial, readable contrast, responsive width, and a height that can scroll on small screens. Preserve visible keyboard focus and disabled-button state.
 - Put the host in a **closed Shadow DOM** so Kour.io page styles are less likely to affect the menu. Query UI elements from the shadow root, not from the page document.
-- Isolate menu interaction events from Kour.io gameplay. Install capture-phase guards on `window` (and, if needed, the menu's shadow root) for keyboard, pointer/mouse, touch, and wheel events whose composed path includes the menu host. Stop those events from propagating to the game, including keyboard events while typing, selecting text, or submitting the form. Do not call `preventDefault()` for ordinary input, focus, selection, clipboard, or form behavior; the menu controls must remain fully usable. Do not suppress events originating outside the menu.
-- Ensure clicking, focusing, typing in, or editing the room URL input never triggers the game's controls or gameplay actions. Check the `composedPath()`/host boundary rather than relying only on `event.target`, because the UI is inside a closed Shadow DOM.
+- Reuse the text-field keyboard shield pattern from `../kour-report.js` (`reportTextFieldFocused` / `shieldReportTextFieldKeys`): track the room input's `focus` and `blur`, then register `keydown`, `keyup`, and `keypress` capture listeners on `window` that call `stopImmediatePropagation()` while that field is focused, except for `Escape`. Do not call `preventDefault()` for text-entry keys; native typing and editing must continue to work. Let `Escape` reach the menu's keyboard handler so it can close the dialog.
+- When the room input receives `pointerdown`, blur `document.activeElement` if it is an `HTMLCanvasElement`, then focus the input, following the same reference pattern. This prevents the game canvas from retaining keyboard focus.
+- Stop pointer/mouse, touch, wheel, click, and other relevant menu events from bubbling out to page-level gameplay handlers without blocking the menu's own handlers or native control behavior. Use the event's `composedPath()` to identify the closed-shadow host; do not rely only on `event.target`. Do not suppress events originating outside the menu.
+- Ensure clicking, focusing, typing in, or editing the room URL input never triggers the game's controls or gameplay actions. A bubble-phase host guard alone is insufficient for keyboard isolation because page capture handlers may run before it.
 - Use inline SVG for the telephone icon; do not fetch icon fonts or add external UI libraries.
 - Use semantic buttons, a form, a label associated with the input, dialog labeling, and `role="status"`/`aria-live="polite"` for status.
 
@@ -146,9 +148,10 @@ Before finishing, confirm:
 
 1. The userscript metadata has the intended name, Kour.io match patterns, run-at mode, and only the grants it needs.
 2. The launcher, modal, glass-red styling, telephone icons, and requested controls are present.
-3. Menu keyboard, pointer/mouse, touch, and wheel interactions do not reach the game, while normal text editing and form behavior remain intact.
-4. Automatic/manual room-link behavior, validation, reset, and hash-change handling match the requirements.
-5. Turnstile is lazy-loaded with the exact public sitekey and errors/expiry are handled.
-6. The payload and strict API-success checks match the contract above.
-7. No stale async callback can update a different menu/verification flow.
-8. JavaScript syntax validation passes. State clearly if real Tampermonkey/browser/API testing was not performed.
+3. Focus tracking and the `window` capture-phase keyboard shield prevent game controls from receiving room-input keys without preventing native text entry; `Escape` still closes the menu.
+4. Pointer/mouse, touch, and wheel interactions do not reach the game, while menu controls and form behavior remain intact.
+5. Automatic/manual room-link behavior, validation, reset, and hash-change handling match the requirements.
+6. Turnstile is lazy-loaded with the exact public sitekey and errors/expiry are handled.
+7. The payload and strict API-success checks match the contract above.
+8. No stale async callback can update a different menu/verification flow.
+9. JavaScript syntax validation passes. State clearly if real Tampermonkey/browser/API testing was not performed.

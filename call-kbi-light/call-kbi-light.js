@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Call KBI Light
 // @namespace    https://kour.io/
-// @version      1.0.0
+// @version      1.0.2
 // @description  Lightweight KBI call requests for Kour.io. Join the KBI Discord: https://discord.gg/Ke3a7ZZWMd
 // @author       kourkbi
 // @license      MIT
@@ -55,6 +55,11 @@
         link = $("#room"), captcha = $(".captcha"), send = $(".send"), status = $(".status");
     let turnstilePromise, turnstile, widget, flowId = 0, checking = false, requestPending = false;
     let automaticRoomLink = "", manualRoomLink = false;
+    let roomTextFieldFocused = false;
+    const shieldRoomTextFieldKeys = (event) => {
+        if (roomTextFieldFocused && event.key !== "Escape") event.stopImmediatePropagation();
+    };
+    ["keydown", "keyup", "keypress"].forEach((type) => window.addEventListener(type, shieldRoomTextFieldKeys, true));
     const roomLink = () => location.hash.length > 1 ? location.href : "";
     const syncRoomLink = (force = false) => {
         const current = roomLink();
@@ -81,6 +86,7 @@
             link.focus();
         } else {
             panel.hidden = true;
+            roomTextFieldFocused = false;
             resetFlow();
             syncRoomLink();
         }
@@ -145,11 +151,26 @@
         }
     };
 
+    // Keep menu interactions from reaching page-level gameplay handlers.
+    const isolateMenuEvent = (event) => {
+        if (event.composedPath().includes(host)) event.stopPropagation();
+    };
+    ["keydown", "keyup", "keypress", "beforeinput", "input", "change", "click", "dblclick",
+        "pointerdown", "pointerup", "pointermove", "pointercancel", "mousedown", "mouseup", "mousemove",
+        "touchstart", "touchmove", "touchend", "touchcancel", "wheel", "contextmenu",
+        "copy", "cut", "paste", "submit"].forEach((type) => host.addEventListener(type, isolateMenuEvent));
+
     // Launcher, close button, backdrop, and keyboard controls.
     $(".icon").addEventListener("click", () => open(panel.hidden));
     $(".close").addEventListener("click", () => open(false));
     panel.addEventListener("click", (event) => { if (event.target === panel) open(false); });
     link.addEventListener("input", () => { manualRoomLink = Boolean(link.value && link.value !== automaticRoomLink); });
+    link.addEventListener("focus", () => { roomTextFieldFocused = true; });
+    link.addEventListener("blur", () => { roomTextFieldFocused = false; });
+    link.addEventListener("pointerdown", () => {
+        if (document.activeElement instanceof HTMLCanvasElement) document.activeElement.blur();
+        link.focus();
+    });
     window.addEventListener("hashchange", () => {
         syncRoomLink();
         if (panel.hidden) return;
@@ -160,7 +181,10 @@
     });
     document.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && !panel.hidden) open(false);
-        if (event.key === "Alt" && !event.repeat) { event.preventDefault(); open(panel.hidden); }
+        if (!roomTextFieldFocused && event.key === "Alt" && !event.repeat) {
+            event.preventDefault();
+            open(panel.hidden);
+        }
     }, true);
     // Validate the room, create the room-level KBI payload, then require Turnstile.
     form.addEventListener("submit", async (event) => {
