@@ -111,15 +111,18 @@ Field names are case-sensitive. If no optional fields are needed, they may be om
 
 ### Successful response
 
-Successful submissions return HTTP `201`. This example shows the base response fields:
+Successful submissions return HTTP `201`. A production report includes a seven-digit numeric `reportId`:
 
 ```json
 {
   "success": true,
   "code": "KOUR_REPORT_API_REPORT_SUBMITTED",
-  "message": "Report submitted successfully."
+  "message": "Report submitted successfully.",
+  "reportId": "1234567"
 }
 ```
+
+The production `reportId` is unique and is stored with the accepted report. The test endpoint also returns a generated seven-digit `reportId`, but it is cosmetic, is not guaranteed to be unique, and is not stored with a report. A simulated success response for a blocked user does not include `reportId`, because no report is created.
 
 A `201` is the API's successful submission response. Discord notification delivery happens asynchronously, so delivery issues do not change this response.
 
