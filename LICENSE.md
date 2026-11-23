@@ -2,6 +2,8 @@ MIT License
 
 Copyright (c) 2026 KourKBI
 
+Kour Report 2.0.0 introduces major updates, including API V2 reporting, conditional verification, and two-way KBI messaging.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

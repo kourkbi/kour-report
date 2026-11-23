@@ -36,94 +36,81 @@ Integrating with the report service? See the [Kour Report API documentation](./A
 
 Greasy Fork and GitHub provide the same version of the script and are kept up to date together. Greasy Fork is the easiest option because your userscript manager handles installation and updates.
 
-In **Settings**, you can change the menu shortcut and the shortcut for showing or hiding both floating buttons. You can independently hide **Report** or **Call KBI**, or hide both together; adjust their shared size (44–140 px) and the **Report** button's opacity (10–100%); and enable dragging to reposition the **Report** button. The **Call KBI** button follows it. Settings are saved for future visits, and **Reset Default** restores the original values.
+In **Settings**, you can change the menu shortcut and the shortcut for showing or hiding both floating buttons. You can independently hide **Report** or **Call KBI**, or hide both together; adjust their shared size (44–140 px) and the **Report** button's opacity (10–100%); enable dragging to reposition the **Report** button; and turn update notifications on or off. The **Call KBI** button follows the **Report** button. Settings are saved for future visits, and **Reset Default** restores the original values.
+
+The **Client token** section in Settings shows the V2 API token masked by default, with controls to reveal or copy it. Kour Report obtains this token from the V2 API and reuses it for reports and messaging. Keep it unchanged so the API can connect reports and inbox replies for this installation.
 
 Kour Report is designed for current versions of Chrome, Edge, Firefox, and Safari with a compatible userscript manager. Older browsers that lack modern JavaScript, Shadow DOM, or Pointer Events (including Internet Explorer) are not supported. The Alt shortcut menu still dims the background if a browser does not support backdrop blur.
 
 > [!NOTE]
 > By default, holding **Left Alt** opens a shortcut wheel. Move the pointer over **Open KBI Report** or **Call KBI**, then release **Left Alt** to choose. **Right Alt** shows or hides both floating buttons. Both shortcuts can be changed in Settings.
 
-When a newer version is available, the report icon displays an update badge and the game shows a notification. Open the menu and select **Update** to choose Greasy Fork (recommended) or GitHub.
+When a newer version is available, the report icon displays an update badge and the game shows a notification. Turn off **Show update notifications** in Settings to hide the badge, the menu update notice, and the in-game alert. When notifications are enabled, open the menu and select **Update** to choose Greasy Fork (recommended) or GitHub. Select **Changelog** beside the menu version to browse release notes; the script reloads [CHANGELOG.md](./CHANGELOG.md) each time the menu opens.
 
 The menu footer also links to the KBI Discord and project GitHub, opens the **Info** panel, and displays the installed script version.
 
+Select **Messages** in the menu to open the KBI message inbox. While Kour Report is active, it checks the API V2 message queue when the page starts, every 3 seconds, and when the page becomes visible again. New messages show a notification and an unread badge; opening the inbox marks them as read through the V2 read-receipt endpoint. Messages are saved in the browser so they remain available after a reload. Polling is coordinated across active script instances to avoid overlapping checks.
+
+In **Settings > Messages**, you can enable or disable the room-entry chat announcement and send it manually with **Send**. The announcement invites players to report hackers with Kour Report by searching Google for **Kour Report** or joining the KBI Discord. The Discord invite is shown in Discord blue. No periodic chat announcements are sent.
+
 ## 🖼️ Screenshots
 
-### Report Menu
+The screenshots below show the main reporting and messaging features, followed by related controls and interface details.
 
-![The report menu showing players in the current room and report options.](./assets/report-menu.png)
+### Main report menu
 
-### Report Manually
+The menu provides access to manual reporting, room calls, report history, messages, and settings. This example also shows the empty player-list state, where manual reports and room calls remain available.
 
-![The manual report menu for entering a player's name when reporting.](./assets/manually-report-menu.png)
+![Kour Report's main menu with reporting, room-call, history, messages, and settings controls.](./assets/report-menu-v2.png)
 
-### Report Details Menu
+### Report details
 
-![The report details menu for selecting a reason and adding optional details.](./assets/report-details-menu.png)
+The details panel summarizes a submitted report, including its reason, reporter, room, submission time, and report number.
 
-### Report Settings Menu
+![A submitted report's details, including the reported player, reason, room information, and report number.](./assets/report-details-v2.png)
 
-![The settings menu for configuring the report icon and keyboard shortcuts.](./assets/report-settings-menu.png)
+### Reports in the message history
 
-### KBI Call
+Report submissions appear in the KBI conversation alongside regular chat messages, with a **View report** action for opening the report details.
 
-The **Report** launcher has a companion **Call KBI** button that appears when you hover over or keyboard-focus the launcher. The main menu also has room and per-player **Call KBI** options. A player call identifies that player for KBI; a room call requests help for the current room. Both call flows require the Cloudflare Turnstile check:
+![A report activity card shown between KBI chat messages in the inbox.](./assets/report-sent-in-chat.png)
 
-![The main menu's KBI Call option and the room call flow.](./assets/kbi-call-main-menu.gif)
+### KBI message inbox
 
-**Call KBI for a selected player** sends a call to KBI identifying the selected player so the team can attend to them:
+The inbox shows incoming replies and sent messages as chat bubbles, with sender identity, timestamps, and message actions.
 
-![Sending a KBI call for a selected player.](./assets/kbi-call-selected-player.gif)
+![The KBI message inbox showing incoming and outgoing conversation bubbles.](./assets/messages-inbox.png)
 
-**Call KBI for the current room** sends a call to KBI about the room you are currently in. If players are detected, the menu first lets you choose a player or continue with a room call. If the menu cannot detect a room link, it asks you to enter one; the floating quick-call button and shortcut-wheel call option require an active room:
+### Report history
 
-![Sending a KBI call for the current room.](./assets/kbi-call-current-room.gif)
+Report history separates real and test submissions and provides report IDs, details, and token-detail controls.
 
-## ✨ New: Call KBI Light
+![The report history with filters, report IDs, token-detail controls, and report detail buttons.](./assets/report-history.png)
 
-**Call KBI Light** is a lightweight companion userscript for sending a room-level call directly to the KBI team from Kour.io. It is separate from the full Kour Report script: it does not detect or select a player, and it does not replace player reports.
+### Floating in-game buttons
 
-### Features
+The floating controls provide separate shortcuts for **Call KBI**, **Report**, and **Messages**. The Messages button displays an unread-count badge.
 
-- Adds a floating **Call KBI** telephone button on Kour.io, plus an **Alt** keyboard shortcut to open or close its menu.
-- Uses a compact, translucent dialog isolated from the game's page styles.
-- Detects the current room from the Kour.io URL and fills in its link automatically. You can also enter or edit a room link yourself.
-- Validates that the link is an HTTP(S) Kour.io link with a room ID before continuing.
-- Loads Cloudflare Turnstile verification only when you submit a request. The request is sent after verification succeeds.
-- Sends a room-level call to KBI; it does not identify a selected player.
-- Shows progress, success, and error messages in the menu.
-- Lets you close the menu with its close button, by clicking outside the dialog, or with **Escape**.
+![The in-game Call KBI, Report, and Messages buttons, including an unread message badge.](./assets/report-call-messages-buttons.png)
 
-### How to send a call
+### Room-entry announcement
 
-1. Open a Kour.io match, then select **Call KBI** or press **Alt**. The current room link is filled in automatically when available.
-2. Confirm or edit the room link. If you are in the lobby, enter a Kour.io room link that includes its room ID.
-3. Select **Continue** and complete Cloudflare Turnstile verification.
-4. After verification, the script sends the room call to KBI and displays the result.
+When enabled, the script can post a one-time message on entering a room, inviting players to find Kour Report or join the KBI Discord.
 
-The request includes the room ID and link, identifies the call as a room-level request (no player selected), and includes your saved in-game nickname when available. If the match changes while verification is in progress, verify the updated room link before continuing.
+![The room-entry chat announcement with a Kour Report invitation and KBI Discord link.](./assets/room-entry-announcement.png)
 
-Install it with Tampermonkey or another compatible userscript manager:
+### Changelog
 
-- **[Install Call KBI Light from Greasy Fork](https://greasyfork.org/en/scripts/603514-call-kbi-light)**
-- **[Open the reusable prompt](./call-kbi-light/call-kbi-light-menu.prompt.md)** — describes the menu design and implementation so you can ask an AI coding assistant to create your own compatible version or adapt it.
+The in-game changelog presents release notes by version, grouping API updates, interface improvements, and fixes.
 
-### Call KBI Light screenshots
-
-**In-game button**
-
-![Call KBI Light telephone button in a Kour.io match](./call-kbi-light/assets/call-kbi-button.png)
-
-**Menu**
-
-![Call KBI Light room-link menu](./call-kbi-light/assets/call-kbi-menu.png)
+![The changelog panel showing the Kour Report 2.0.0 changes.](./assets/changelog-menu.png)
 
 ## ⚙️ How It Works
 
 1. When run on Kour.io, the script detects the current match and lists other players in the room. The **Players** heading and player count appear only when there are players to report.
 2. Select a detected player or choose **Report manually** to enter a name yourself. Manual reporting is available in the lobby and at any time; when no players are detected, the button appears with the empty-state message, and when players are listed it appears below them. Choose a reason: **Invisibility**, **Aimbot**, **Flying**, **Wallhack**, or **Other**. If detection returns no players in a match, the menu notes that the room may be empty or detection may have failed.
 3. Optionally add details to the report.
-4. Complete the Cloudflare Turnstile security check to submit the report. The result is shown in the report menu.
+4. If the V2 API requests it, complete the Cloudflare Turnstile security check. The result is shown in the report menu.
 
 For an automatic report, the selected player must still be in the current match. Choose **Report manually** at any time to enter the player's name yourself. If you do not know the full name or it is difficult to spell, use the **?** beside the name field for help; you can leave the field blank or enter only the part you know.
 
