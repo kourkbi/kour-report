@@ -1,15 +1,21 @@
 # Kour Report Changelog
 
-Release notes are listed from newest to oldest. The in-game Changelog button loads this file whenever the menu opens.
+## [2.0.0] - 2026-11-22
 
-## [1.0.8] - 2026-11-17
+### API V2
+- Migrated production reports and test reports to the V2 API.
+- Added server-generated, stable client tokens required for reports and all messaging operations.
+- Added V2 report metadata: script version and detected room player count.
+- Added conditional Turnstile verification for reports and outgoing messages when requested by the API.
+- Added the V2 message inbox API: retrieve KBI messages, send replies, and record read receipts.
 
-### Added
-- Added a local report history with player avatars, report details, report IDs, and a copy-ID action.
-- Added an optional test mode that routes player reports, manual reports, and all KBI calls to the public test channel.
-- Added an in-menu changelog viewer that displays release notes from this file.
+### Messaging and interface
+- Added the in-game KBI inbox with unread count, notifications, sender names, locally saved conversations, and read status.
+- Added message settings and a one-time room-entry announcement; periodic chat announcements are not sent.
+- Added a companion Messenger launcher and improved the show/hide transitions for the floating launchers.
+- Added animated token details in Report History and an important reminder beside the room-entry announcement setting.
 
-### Improved
-- Improved text entry and keyboard handling in report and KBI call forms while the game is active.
-- Improved compatibility for opening the report menu with the Alt shortcut.
-- Added clearer labels for test submissions and refined the menu controls.
+### Fixes and improvements
+- Improved text-field focus and keyboard handling, including composition input, to keep report and message entry usable while the game is active.
+- Improved browser fallbacks for text submission and input event handling.
+- Fixed menu and reason-selection interactions, message polling coordination, and related menu presentation issues.
