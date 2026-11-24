@@ -78,7 +78,7 @@ const response = await fetch(
       sessionLink: "https://kour.io/#AB12CD",
       reporter: "ReportingPlayer",
       reason: "Brief description",
-      reportScriptVersion: "2.0.0",
+      reportScriptVersion: "2.0.1",
       roomPlayerCount: 6,
       clientToken,
     }),

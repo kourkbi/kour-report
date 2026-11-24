@@ -1,4 +1,4 @@
 {
-  "version": "2.0.0",
-  "details": "Migrated report submission to API V2 with conditional verification, client metadata, and personalized messages."
+  "version": "2.0.1",
+  "details": "Fixed messaging bugs, improved message notifications and positioning, and added a local error log viewer."
 }

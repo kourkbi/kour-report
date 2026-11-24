@@ -1,5 +1,16 @@
 # Kour Report Changelog
 
+## [2.0.1] - 2026-11-24
+
+### Messaging and notifications
+- Fixed outgoing messages disappearing when the client is blocked and corrected auto-scroll when sending near the latest message.
+- Improved notification readability and queue behavior, and added settings to place notifications in any screen corner.
+- Fixed the floating Messages button remaining enlarged after closing the inbox.
+
+### Settings and diagnostics
+- Added a local Error Logs viewer for script-related errors, including captured console and unhandled errors.
+- Improved the position selector and settings tooltips, and refined settings controls and interaction feedback.
+
 ## [2.0.0] - 2026-11-22
 
 ### API V2

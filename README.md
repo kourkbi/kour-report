@@ -36,7 +36,7 @@ Integrating with the report service? See the [Kour Report API documentation](./A
 
 Greasy Fork and GitHub provide the same version of the script and are kept up to date together. Greasy Fork is the easiest option because your userscript manager handles installation and updates.
 
-In **Settings**, you can change the menu shortcut and the shortcut for showing or hiding both floating buttons. You can independently hide **Report** or **Call KBI**, or hide both together; adjust their shared size (44–140 px) and the **Report** button's opacity (10–100%); enable dragging to reposition the **Report** button; and turn update notifications on or off. The **Call KBI** button follows the **Report** button. Settings are saved for future visits, and **Reset Default** restores the original values.
+In **Settings**, you can change the menu shortcut and the shortcut for showing or hiding both floating buttons. You can independently hide **Report** or **Call KBI**, or hide both together; adjust their shared size (44–140 px) and the **Report** button's opacity (10–100%); enable dragging to reposition the **Report** button; and turn update notifications on or off. You can also choose which screen corner message notifications use and review script errors in the local **Error logs** viewer. The **Call KBI** button follows the **Report** button. Settings are saved for future visits, and **Reset Default** restores the original values.
 
 The **Client token** section in Settings shows the V2 API token masked by default, with controls to reveal or copy it. Kour Report obtains this token from the V2 API and reuses it for reports and messaging. Keep it unchanged so the API can connect reports and inbox replies for this installation.
 
@@ -103,7 +103,7 @@ When enabled, the script can post a one-time message on entering a room, invitin
 
 The in-game changelog presents release notes by version, grouping API updates, interface improvements, and fixes.
 
-![The changelog panel showing the Kour Report 2.0.0 changes.](./assets/changelog-menu.png)
+![The in-game changelog panel showing release notes.](./assets/changelog-menu.png)
 
 ## ⚙️ How It Works
 

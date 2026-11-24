@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kour Report
 // @namespace    https://kour.io/
-// @version      2.0.0
+// @version      2.0.1
 // @description  Kour Report is a community-made userscript for Kour.io that helps players report cheaters and disruptive behavior directly from a match. Submit player reports with the room link and reason, contact the KBI team with Call KBI, and exchange messages with KBI through the built-in chat. Includes manual reporting, report history, message notifications, and configurable in-game controls. Not affiliated with Kour. Join the KBI Discord: https://discord.gg/Ke3a7ZZWMd
 // @author       kourkbi
 // @license      MIT
@@ -22,6 +22,189 @@
 
 (() => {
     "use strict";
+
+    const KOUR_LOG_STORAGE_KEY = "kourReportDiagnosticLogsV1";
+    const KOUR_LOG_LIMIT = 300;
+    const KOUR_LOG_ENTRY_LENGTH_LIMIT = 6000;
+    const kourLogEntries = [];
+    const originalConsoleMethods = {};
+    let kourLogsLoaded = false;
+    let recordingRuntimeError = false;
+    let kourLogListElement = null;
+    let kourLogCountElements = [];
+
+    function formatKourLogValue(value) {
+        if (value instanceof Error) {
+            return `${value.name}: ${value.message}${value.stack ? `\n${value.stack}` : ""}`;
+        }
+        if (typeof value === "string") return value;
+        try {
+            const serialized = JSON.stringify(value, (key, nestedValue) => {
+                if (nestedValue instanceof Error) {
+                    return {
+                        name: nestedValue.name,
+                        message: nestedValue.message,
+                        stack: nestedValue.stack,
+                    };
+                }
+                return typeof nestedValue === "bigint" ? String(nestedValue) : nestedValue;
+            }, 2);
+            return serialized === undefined ? String(value) : serialized;
+        } catch {
+            return String(value);
+        }
+    }
+
+    function loadKourLogEntries() {
+        if (kourLogsLoaded) return;
+        kourLogsLoaded = true;
+        try {
+            const savedEntries = JSON.parse(window.localStorage.getItem(KOUR_LOG_STORAGE_KEY) || "[]");
+            if (!Array.isArray(savedEntries)) {
+                throw new TypeError("Saved diagnostic logs must be an array.");
+            }
+            savedEntries.slice(-KOUR_LOG_LIMIT).forEach((entry) => {
+                if (entry && typeof entry === "object" &&
+                    ["error", "warning", "info"].includes(entry.level) &&
+                    typeof entry.message === "string" &&
+                    typeof entry.timestamp === "string") {
+                    kourLogEntries.push({
+                        level: entry.level,
+                        message: entry.message.slice(0, KOUR_LOG_ENTRY_LENGTH_LIMIT),
+                        timestamp: entry.timestamp,
+                    });
+                }
+            });
+        } catch (error) {
+            const log = originalConsoleMethods.warn;
+            if (log) log("[Kour Report] Could not load saved diagnostic logs:", error);
+        }
+    }
+
+    function renderKourLogViewer() {
+        if (!kourLogListElement || !kourLogCountElements.length) return;
+        loadKourLogEntries();
+        const visibleEntries = kourLogEntries.slice(-100);
+        const countLabel = `${kourLogEntries.length} log${kourLogEntries.length === 1 ? "" : "s"}`;
+        kourLogCountElements.forEach((element) => {
+            element.textContent = countLabel;
+        });
+        kourLogListElement.replaceChildren();
+        if (!visibleEntries.length) {
+            const empty = document.createElement("p");
+            empty.className = "error-log-empty";
+            empty.textContent = "No logs recorded yet.";
+            kourLogListElement.appendChild(empty);
+            return;
+        }
+        visibleEntries.slice().reverse().forEach((entry) => {
+            const row = document.createElement("article");
+            row.className = `error-log-entry is-${entry.level}`;
+            const metadata = document.createElement("div");
+            metadata.className = "error-log-metadata";
+            const level = document.createElement("strong");
+            level.textContent = entry.level === "error"
+                ? "ERROR"
+                : entry.level === "warning" ? "WARNING" : "LOG";
+            const timestamp = document.createElement("time");
+            timestamp.dateTime = entry.timestamp;
+            const date = new Date(entry.timestamp);
+            timestamp.textContent = Number.isNaN(date.getTime()) ? entry.timestamp : date.toLocaleString();
+            metadata.append(level, timestamp);
+            const message = document.createElement("pre");
+            message.className = "error-log-message";
+            message.textContent = entry.message;
+            row.append(metadata, message);
+            kourLogListElement.appendChild(row);
+        });
+    }
+
+    function recordKourLog(level, message) {
+        loadKourLogEntries();
+        kourLogEntries.push({
+            level,
+            message: String(message).slice(0, KOUR_LOG_ENTRY_LENGTH_LIMIT),
+            timestamp: new Date().toISOString(),
+        });
+        if (kourLogEntries.length > KOUR_LOG_LIMIT) {
+            kourLogEntries.splice(0, kourLogEntries.length - KOUR_LOG_LIMIT);
+        }
+        try {
+            window.localStorage.setItem(KOUR_LOG_STORAGE_KEY, JSON.stringify(kourLogEntries));
+        } catch (error) {
+            const log = originalConsoleMethods.error;
+            if (log) log("[Kour Report] Could not persist diagnostic logs:", error);
+        }
+        renderKourLogViewer();
+    }
+
+    function isKourReportSource(value) {
+        return typeof value === "string" && /kour(?:-|_|%20| )?report/i.test(value);
+    }
+
+    function recordKourRuntimeError(message) {
+        if (recordingRuntimeError) return;
+        recordingRuntimeError = true;
+        try {
+            recordKourLog("error", message);
+        } catch (error) {
+            const log = originalConsoleMethods.error;
+            if (log) log("[Kour Report] Could not record a runtime error:", error);
+        } finally {
+            recordingRuntimeError = false;
+        }
+    }
+
+    ["error", "warn", "log", "info", "debug", "trace", "assert"].forEach((method) => {
+        const original = window.console[method].bind(window.console);
+        originalConsoleMethods[method] = original;
+        try {
+            window.console[method] = function kourReportConsoleCapture(...args) {
+                original(...args);
+                if (method === "assert" && args[0]) return;
+                const hasKourReportPrefix =
+                    typeof args[method === "assert" ? 1 : 0] === "string" &&
+                    args[method === "assert" ? 1 : 0].startsWith("[Kour Report]");
+                const stackLines = (new Error().stack || "").split("\n");
+                const wrapperFrame = stackLines.findIndex((line) =>
+                    line.includes("kourReportConsoleCapture")
+                );
+                const callerStack = stackLines
+                    .slice(wrapperFrame >= 0 ? wrapperFrame + 1 : 2)
+                    .join("\n");
+                if (!hasKourReportPrefix && !isKourReportSource(callerStack)) return;
+                const level = method === "error" || method === "assert"
+                    ? "error"
+                    : method === "warn" ? "warning" : "info";
+                const loggedArgs = method === "assert" ? args.slice(1) : args;
+                recordKourLog(level, loggedArgs.map(formatKourLogValue).join(" "));
+            };
+        } catch (error) {
+            original("[Kour Report] Could not enable diagnostic log capture:", error);
+        }
+    });
+    window.addEventListener("error", (event) => {
+        const errorStack = event.error && typeof event.error.stack === "string"
+            ? event.error.stack
+            : "";
+        if (!isKourReportSource(event.filename) && !isKourReportSource(errorStack)) return;
+        const source = event.filename
+            ? ` (${event.filename}${event.lineno ? `:${event.lineno}` : ""}${event.colno ? `:${event.colno}` : ""})`
+            : "";
+        const details = event.error
+            ? formatKourLogValue(event.error)
+            : String(event.message || "Unknown runtime error");
+        recordKourRuntimeError(`[Kour Report] Uncaught script error${source}: ${details}`);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+        const reasonStack = event.reason && typeof event.reason.stack === "string"
+            ? event.reason.stack
+            : "";
+        if (!isKourReportSource(reasonStack) && !isKourReportSource(String(event.reason))) return;
+        recordKourRuntimeError(
+            `[Kour Report] Unhandled script promise rejection: ${formatKourLogValue(event.reason)}`
+        );
+    });
 
     /***************************************
      * Report API Endpoint
@@ -106,6 +289,39 @@
         localRawName: "",
         players: new Map(),
     };
+    let observedGameNickname = "";
+    let observedGameGuestName = "";
+    const reportPageWindow = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+    reportPageWindow.addEventListener("kour-report-match-players", (event) => {
+        let detail = event.detail;
+        if (typeof detail === "string") {
+            try {
+                detail = JSON.parse(detail);
+            } catch {
+                return;
+            }
+        }
+        if (!detail || typeof detail !== "object" || !Array.isArray(detail.players)) return;
+
+        const localPlayer = detail.players.find((player) => player?.local === true);
+        if (!detail.active || !localPlayer) {
+            observedGameNickname = "";
+            observedGameGuestName = "";
+            return;
+        }
+        const candidateName = [localPlayer.rawName, localPlayer.name].find((value) => {
+            if (typeof value !== "string") return false;
+            const name = value.replace(/<[^>]*>/g, "").trim().toLowerCase();
+            return name && name !== "you" && name !== "game default" && name !== "no detected";
+        });
+        observedGameNickname = typeof candidateName === "string" ? candidateName.trim().slice(0, 1000) : "";
+        const localId = typeof localPlayer.key === "string" || typeof localPlayer.key === "number"
+            ? String(localPlayer.key).trim()
+            : "";
+        observedGameGuestName = !observedGameNickname && localId
+            ? `Guest_${localId.slice(0, 100)}`
+            : "";
+    });
     const REPORT_ROOM_ANNOUNCEMENT =
         `<color=#ed3434>[Kour Report]</color> <color=#ffffff>Report hackers with Kour Report. Search Google for "Kour Report" or join our Discord: <color=#5865f2>${DISCORD_URL}</color></color>`;
     let onReportMatchPlayersUpdated = null;
@@ -170,10 +386,7 @@
         const socket = activeReportMatchSocket;
         if (!isReportMatchChatReady() || !socket) return false;
 
-        const messageBytes = new Uint8Array(message.length);
-        for (let index = 0; index < message.length; index += 1) {
-            messageBytes[index] = message.charCodeAt(index);
-        }
+        const messageBytes = new TextEncoder().encode(message);
         const lengthBytes = [];
         let remainingLength = messageBytes.length;
         do {
@@ -641,7 +854,7 @@
     const MESSAGE_POLL_MIN_INTERVAL_MS = 1100;
     const MESSAGE_NOTIFICATION_DURATION_MS = 7000;
     const MESSAGE_NOTIFICATION_ANIMATION_MS = 220;
-    const MAX_QUEUED_MESSAGE_NOTIFICATIONS = 3;
+    const MAX_VISIBLE_MESSAGE_NOTIFICATIONS = 3;
     const MESSAGE_STORAGE_KEY = "kourReportMessagesV2";
     const MESSAGE_POLL_COORDINATION_KEY = "kourReportMessagesNextPollAtV2";
     const MESSAGE_SENDER_NAME_STORAGE_KEY = "kourReportMessageSenderNameV2";
@@ -654,9 +867,11 @@
     let apiHealthCheckInProgress = false;
     let apiHealthLastCheckedAt = 0;
     let messagePollInProgress = false;
+    let lastMessagePollError = "";
     let customMessages = [];
     const messageNotificationTimers = new Map();
     let messageNotificationQueue = [];
+    const messageNotificationIds = new Set();
     let messagesCloseFocusTarget = null;
     let clientTokenFeedbackTimer = 0;
     const UI_COLORS = Object.freeze({
@@ -736,7 +951,8 @@
     function getMessageSenderName() {
         try {
             const savedName = window.localStorage.getItem(MESSAGE_SENDER_NAME_STORAGE_KEY);
-            if (typeof savedName === "string" && savedName.trim()) {
+            if (typeof savedName === "string" && savedName.trim() &&
+                !["no detected", "game default"].includes(savedName.trim().toLowerCase())) {
                 return savedName.trim().slice(0, 100);
             }
         } catch (error) {
@@ -1217,6 +1433,9 @@
                 box-shadow: 0 5px 16px rgba(0,0,0,.55), inset 0 1px 0 #cbb2df, inset 0 -2px 0 #4a3265;
                 transform: scale(1.12);
             }
+            .launcher-quick-messages.is-visible:focus-visible {
+                outline: 2px solid #d8ff52; outline-offset: 3px;
+            }
             .launcher-quick-messages.is-visible.button-pressable:active,
             .launcher-quick-messages.is-visible.button-pressable.is-pressed {
                 color: var(--button-press-foreground);
@@ -1421,6 +1640,7 @@
             .popup-layer:not(.is-closing) > .info-dialog,
             .popup-layer:not(.is-closing) > .changelog-dialog,
             .popup-layer:not(.is-closing) > .settings-dialog,
+            .popup-layer:not(.is-closing) > .error-log-dialog,
             .popup-layer:not(.is-closing) > .report-dialog,
             .popup-layer:not(.is-closing) > .report-history-dialog,
             .popup-layer:not(.is-closing) > .messages-dialog,
@@ -1436,6 +1656,7 @@
             .popup-layer.is-closing > .info-dialog,
             .popup-layer.is-closing > .changelog-dialog,
             .popup-layer.is-closing > .settings-dialog,
+            .popup-layer.is-closing > .error-log-dialog,
             .popup-layer.is-closing > .report-dialog,
             .popup-layer.is-closing > .report-history-dialog,
             .popup-layer.is-closing > .messages-dialog,
@@ -1640,17 +1861,39 @@
             }
             .room-full-report-tooltip { z-index: 21; }
             .settings-checkbox {
-                display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-content: center;
-                appearance: none; border: 1px solid var(--color-control-highlight); border-radius: var(--radius-control);
-                background: var(--color-control); cursor: pointer;
+                display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-content: center;
+                appearance: none; border: 1px solid #4b4b50; border-radius: 6px;
+                background: linear-gradient(180deg, #303034, #252529); cursor: pointer;
+                transition: transform var(--duration-control) ease, background var(--duration-control) ease,
+                    border-color var(--duration-control) ease, box-shadow var(--duration-control) ease;
             }
-            .settings-checkbox::after {
-                width: 5px; height: 9px; border: solid var(--button-press-foreground); border-width: 0 2px 2px 0;
+            .settings-checkbox::after, .settings-position-check::after {
+                width: 7px; height: 11px; border: solid #fff; border-width: 0 3px 3px 0;
                 content: ""; opacity: 0; transform: rotate(45deg) translate(-1px, -1px);
             }
-            .settings-checkbox:checked { border-color: var(--color-text-muted); background: var(--color-text-muted); }
+            .settings-position-option[aria-selected="true"] .settings-position-check::after { opacity: 1; }
+            .settings-checkbox:checked {
+                border-color: #646468; background: linear-gradient(180deg, #707074, #5c5c60);
+            }
             .settings-checkbox:checked::after { opacity: 1; }
-            .settings-checkbox:hover { border-color: var(--color-text-muted); background: var(--color-text-muted); }
+            .settings-checkbox:hover:not(:checked) {
+                border-color: #77777c; background: linear-gradient(180deg, #3a3a3f, #2d2d31);
+                box-shadow: 0 3px 8px #0005; transform: scale(1.06);
+            }
+            .settings-checkbox:checked:hover {
+                border-color: #77777c; background: linear-gradient(180deg, #7a7a7e, #66666a);
+                box-shadow: 0 3px 8px #0005; transform: scale(1.06);
+            }
+            .settings-checkbox.button-pressable:active,
+            .settings-checkbox.button-pressable.is-pressed {
+                background: linear-gradient(180deg, #39393d, #2d2d31);
+                border-color: #727277; box-shadow: inset 0 1px 3px #0008;
+            }
+            .settings-checkbox:checked.button-pressable:active,
+            .settings-checkbox:checked.button-pressable.is-pressed {
+                background: linear-gradient(180deg, #5b5b5f, #4f4f53);
+                border-color: #77777c; box-shadow: inset 0 1px 3px #0006;
+            }
             .settings-checkbox:focus-visible {
                 outline: 2px solid #d8ff52; outline-offset: 3px;
             }
@@ -1671,6 +1914,12 @@
                 min-width: 92px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--radius-control);
                 color: var(--color-text-primary); background: var(--color-control); cursor: pointer; font-size: 12px; font-weight: 800;
             }
+            .settings-position-select { width: 160px; flex: 0 0 160px; }
+            .reason-options.settings-position-options { max-height: 180px; }
+            .reason-option-check.settings-position-check {
+                display: grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center;
+                margin-left: auto; font-size: 0;
+            }
             .settings-key-hint {
                 margin: 7px 5px 0; color: var(--color-text-muted); font-size: 11px; font-weight: 700;
             }
@@ -1681,6 +1930,81 @@
             }
             .settings-room-announcement-status.is-error { color: #e27d7d; }
             .settings-room-announcement-status[hidden] { display: none; }
+            .error-log-layer { z-index: 8; }
+            .error-log-layer[hidden] { display: none; }
+            .error-log-dialog {
+                display: flex; box-sizing: border-box; width: min(560px, calc(100vw - 32px));
+                max-height: calc(100vh - 36px); max-height: calc(100dvh - 36px);
+                flex-direction: column; overflow: hidden; padding: 16px;
+                border: 1px solid var(--color-border-dialog); border-radius: var(--radius-large);
+                color: var(--color-text-primary); background: var(--color-menu); box-shadow: var(--shadow-dialog);
+            }
+            .error-log-header {
+                min-height: 54px; flex: 0 0 auto; margin: -16px -16px 10px; padding: 9px 14px;
+                border-bottom: 1px solid var(--color-surface-muted); background: var(--color-menu-header);
+            }
+            .error-log-description {
+                flex: 0 0 auto; margin: 0 0 10px; color: var(--color-text-muted);
+                font: 600 12px/1.45 var(--font-ui);
+            }
+            .error-log-toolbar {
+                display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between;
+                gap: 10px; margin: 0 0 8px; color: var(--color-text-muted);
+                font: 700 11px/1.3 var(--font-ui);
+            }
+            .error-log-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+            .error-log-action {
+                min-height: 30px; padding: 0 9px; border: 1px solid var(--color-control-highlight);
+                border-radius: var(--radius-control); color: var(--color-text-primary);
+                background: linear-gradient(180deg, var(--color-control-highlight), var(--color-control-shadow));
+                cursor: pointer; font: 800 11px/1 var(--font-ui);
+                transition: filter var(--duration-fast) ease, transform var(--duration-fast) ease;
+            }
+            .error-log-action:hover { filter: brightness(1.12); }
+            .error-log-action:active { transform: scale(.96); }
+            .error-log-action:focus-visible { outline: 2px solid #d6d6d6; outline-offset: 2px; }
+            .error-log-list {
+                display: grid; min-height: 0; flex: 1 1 auto; max-height: min(64vh, 560px);
+                gap: 7px; overflow: auto; margin: 0; padding: 7px;
+                border: 1px solid var(--color-border-dialog); border-radius: var(--radius-control);
+                background: var(--color-menu-header);
+                overscroll-behavior: contain;
+            }
+            .error-log-entry {
+                min-width: 0; padding: 9px 10px; border: 1px solid #343438;
+                border-left: 3px solid #64646a; border-radius: var(--radius-control);
+                background: #1b1b1e;
+            }
+            .error-log-entry.is-warning { border-left-color: #c9a653; }
+            .error-log-entry.is-error { border-color: #633b3b; border-left-color: #ed3434; }
+            .error-log-metadata {
+                display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+                gap: 4px 10px; margin-bottom: 5px; color: var(--color-text-muted);
+                font: 700 10px/1.35 var(--font-ui);
+            }
+            .error-log-metadata strong { color: #d3d3d6; letter-spacing: .35px; }
+            .error-log-entry.is-warning .error-log-metadata strong { color: #e0c274; }
+            .error-log-entry.is-error .error-log-metadata strong { color: #ff7777; }
+            .error-log-message {
+                margin: 0; color: var(--color-text-description); font: 600 12px/1.5 var(--font-ui);
+                overflow-wrap: anywhere; white-space: pre-wrap;
+            }
+            .error-log-entry.is-error .error-log-message { color: #ffaaaa; }
+            .error-log-empty {
+                margin: 8px; color: var(--color-text-muted); font: 650 12px/1.45 var(--font-ui);
+                text-align: center;
+            }
+            .error-log-status {
+                min-height: 16px; flex: 0 0 auto; margin: 7px 0 0; color: var(--color-text-muted);
+                font: 700 11px/1.4 var(--font-ui); overflow-wrap: anywhere;
+            }
+            .error-log-status.is-error { color: #ff8888; }
+            .error-log-status:empty { display: none; }
+            .settings-log-launcher {
+                display: flex; min-height: 58px; align-items: center; justify-content: space-between;
+                gap: 12px; padding: 8px 5px; border-bottom: 1px solid var(--color-surface-muted);
+            }
+            .settings-log-count { color: var(--color-text-muted); font: 700 10px/1.3 var(--font-ui); }
             .settings-reset {
                 display: block; width: min(300px, 100%); min-height: 40px; margin: 15px auto 0;
                 border: 0; border-radius: var(--radius-control); color: var(--color-white); background: #8e2020;
@@ -1884,9 +2208,13 @@
             .messages-layer { z-index: 6; }
             .messages-layer[hidden] { display: none; }
             .verification-layer { z-index: 9; }
+            .messages-action-menu-layer {
+                position: fixed; z-index: 7; inset: 0; overflow: visible;
+                pointer-events: none;
+            }
             .messages-dialog {
                 display: flex; box-sizing: border-box;
-                width: min(720px, calc(100vw - 36px));
+                width: min(760px, calc(100vw - 36px));
                 max-height: calc(100vh - 36px); max-height: calc(100dvh - 36px);
                 flex-direction: column; overflow: hidden; padding: 18px;
                 border: 1px solid var(--color-border-dialog); border-radius: var(--radius-large);
@@ -1897,16 +2225,12 @@
                 min-height: 58px; flex: 0 0 auto; margin: -18px -18px 12px; padding: 9px 14px;
                 border-bottom: 1px solid var(--color-surface-muted); background: var(--color-menu-header);
             }
-            .messages-description {
-                flex: 0 0 auto; margin: 0 0 12px; color: var(--color-text-muted);
-                font: 650 12px/1.45 var(--font-ui);
-            }
             .messages-empty { margin: 8px 0; color: var(--color-text-muted); font: 700 13px/1.45 var(--font-ui); text-align: center; }
             .messages-list {
-                display: flex; min-height: min(280px, 30vh); max-height: min(52vh, 560px);
+                display: flex; min-height: min(320px, 32vh); max-height: min(56vh, 620px);
                 flex-direction: column; gap: 10px;
                 overflow: auto; padding: 16px 12px; border: 1px solid #343438; border-radius: var(--radius-medium);
-                background: #202023;
+                background: #202023; overscroll-behavior: contain; scrollbar-gutter: stable;
             }
             .messages-list[hidden], .messages-empty[hidden] { display: none; }
             .messages-header-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
@@ -2053,10 +2377,12 @@
                 border-color: #77777d; background: #29292d;
                 box-shadow: 0 0 0 1px rgba(220, 220, 225, .12);
             }
+            .messages-compose:focus-within .messages-input { transform: translateY(-1px); }
             .messages-send {
                 flex: 0 0 auto; min-width: 82px; min-height: 40px; padding: 8px 12px;
                 font: 700 13px/1.45 var(--font-decorative);
-                transition: filter var(--duration-fast) ease, transform var(--button-press-duration) ease;
+                transition: filter var(--duration-fast) ease, transform var(--button-press-duration) ease,
+                    box-shadow var(--duration-control) ease;
             }
             .messages-send.report-history-action {
                 display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -2065,17 +2391,24 @@
             }
             .messages-send.report-history-action:hover { filter: brightness(1.12); }
             .messages-send:disabled { opacity: .55; cursor: default; }
+            .messages-send:not(:disabled) { box-shadow: 0 0 0 1px #ffffff12, 0 3px 12px #0005; }
+            .messages-send:not(:disabled):hover { filter: brightness(1.12); transform: translateY(-1px); }
             .messages-row {
                 position: relative; z-index: 0;
                 display: flex; flex: 0 0 auto; align-self: stretch; box-sizing: border-box;
                 width: 100%; align-items: flex-end; justify-content: flex-start; gap: 8px;
             }
             .messages-row.is-new {
-                animation: messages-bubble-in 180ms cubic-bezier(.2,.8,.2,1) both;
+                animation: messages-bubble-in 280ms cubic-bezier(.2,.8,.2,1) both;
             }
             .messages-row.is-new.is-outgoing {
-                animation: messages-send-from-bottom 320ms cubic-bezier(.18,.78,.24,1) both;
+                animation: messages-send-from-bottom 380ms cubic-bezier(.18,.78,.24,1) both;
             }
+            .messages-row.is-new .messages-entry {
+                animation: messages-entry-reveal 320ms cubic-bezier(.18,.78,.24,1) both;
+                transform-origin: bottom left;
+            }
+            .messages-row.is-new.is-outgoing .messages-entry { transform-origin: bottom right; }
             .messages-row.is-outgoing { justify-content: flex-end; }
             .messages-entry {
                 position: relative;
@@ -2117,6 +2450,13 @@
                 box-shadow: 0 8px 22px #000b; font: 650 11px/1.35 var(--font-ui);
                 animation: messages-action-menu-in 150ms cubic-bezier(.2,.8,.2,1) both;
             }
+            .messages-entry-menu.is-portal, .messages-entry-delete-confirm.is-portal {
+                position: fixed; z-index: 1; top: 0; left: 0; right: auto; bottom: auto;
+                width: min(250px, calc(100vw - 24px));
+                max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px);
+                overflow-y: auto; pointer-events: auto;
+            }
+            .messages-entry-delete-confirm.is-portal { width: min(280px, calc(100vw - 24px)); }
             .messages-row:not(.is-outgoing) .messages-entry-menu,
             .messages-row:not(.is-outgoing) .messages-entry-delete-confirm { left: 0; right: auto; }
             .messages-row.is-outgoing .messages-entry-menu,
@@ -2321,113 +2661,120 @@
             .messages-entry-status.is-error {
                 color: #ffaaaa;
             }
+            .messages-entry-status.is-blocked {
+                width: 130px; flex-basis: 130px; white-space: normal;
+            }
             @keyframes messages-bubble-in {
-                from { opacity: 0; transform: translateY(7px) scale(.98); }
+                from { opacity: 0; transform: translateY(12px) scale(.975); }
                 to { opacity: 1; transform: translateY(0) scale(1); }
             }
             @keyframes messages-send-from-bottom {
-                from { opacity: 0; transform: translateY(30px) scale(.96); }
+                from { opacity: 0; transform: translateY(22px) scale(.965); }
                 to { opacity: 1; transform: translateY(0) scale(1); }
             }
-            .messages-status { flex: 0 0 auto; margin: 7px 0 0; color: var(--color-text-muted); font: 600 11px/1.4 var(--font-ui); }
-            .messages-status:empty { display: none; }
+            @keyframes messages-entry-reveal {
+                from { opacity: .55; transform: translateY(5px) scale(.94); }
+                to { opacity: 1; transform: translateY(0) scale(1); }
+            }
             .message-notification-stack {
-                position: fixed; z-index: 22; top: max(16px, env(safe-area-inset-top)); left: 50%;
-                display: grid; width: min(350px, calc(100vw - 24px)); max-height: min(150px, calc(100vh - 32px));
-                overflow: hidden; pointer-events: none; transform: translateX(-50%);
+                position: fixed; z-index: 22; top: max(12px, env(safe-area-inset-top));
+                right: max(12px, env(safe-area-inset-right)); display: grid;
+                width: min(360px, calc(100vw - 24px)); max-height: min(270px, calc(100vh - 24px));
+                max-height: min(270px, calc(100dvh - 24px));
+                gap: 5px; overflow: visible; pointer-events: none;
+            }
+            .message-notification-stack.is-top-right {
+                top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
+                bottom: auto; left: auto;
+            }
+            .message-notification-stack.is-top-left {
+                top: max(12px, env(safe-area-inset-top)); right: auto;
+                bottom: auto; left: max(12px, env(safe-area-inset-left));
+            }
+            .message-notification-stack.is-bottom-right {
+                top: auto; right: max(12px, env(safe-area-inset-right));
+                bottom: max(12px, env(safe-area-inset-bottom)); left: auto;
+            }
+            .message-notification-stack.is-bottom-left {
+                top: auto; right: auto; bottom: max(12px, env(safe-area-inset-bottom));
+                left: max(12px, env(safe-area-inset-left));
             }
             .message-notification-stack[hidden] { display: none; }
             .message-notification-toast {
-                position: relative; width: 100%; overflow: hidden; pointer-events: auto;
-                border: 1px solid #3c5962; border-radius: 12px;
-                color: var(--color-text-description);
-                background: linear-gradient(145deg, #263238, #1d2529);
-                box-shadow: 0 8px 22px #0009, inset 0 1px 0 #ffffff0d;
-                font: 650 12px/1.45 var(--font-ui); text-shadow: 0 1px 1px var(--color-shadow);
+                position: relative; isolation: isolate; display: grid; width: 100%;
+                grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+                overflow: hidden; pointer-events: auto;
+                border: 1px solid var(--color-border-dialog); border-radius: var(--radius-large);
+                color: var(--color-text-primary); background: rgba(23, 23, 25, .96);
+                box-shadow: var(--shadow-dialog), inset 0 1px 0 #ffffff0c;
+                -webkit-backdrop-filter: blur(10px) saturate(1.1);
+                backdrop-filter: blur(10px) saturate(1.1);
+                font: 600 12px/1.4 var(--font-ui);
             }
-            .message-notification-toast.is-entering { animation: message-notification-enter ${MESSAGE_NOTIFICATION_ANIMATION_MS}ms cubic-bezier(.2, .8, .2, 1) both; }
+            .message-notification-toast.is-entering { animation: message-notification-enter ${MESSAGE_NOTIFICATION_ANIMATION_MS}ms ease-out both; }
             .message-notification-toast.is-closing {
                 pointer-events: none;
                 animation: message-notification-exit ${MESSAGE_NOTIFICATION_ANIMATION_MS}ms ease-in both;
             }
-            .message-notification-open {
-                position: relative; z-index: 1; display: grid; width: 100%;
-                grid-template-columns: minmax(0, 1fr) 30px; align-items: center; gap: 8px;
-                padding: 10px 11px 12px; border: 0; border-radius: inherit;
-                color: inherit; background: transparent; cursor: pointer; text-align: left;
-                font: inherit; text-shadow: inherit;
-                transition: background 160ms ease, transform 140ms ease;
-                touch-action: manipulation;
-            }
-            .message-notification-open:hover,
-            .message-notification-open:focus-visible { background: #9acbd10c; }
-            .message-notification-open:focus-visible { outline: 2px solid #6fa7b4; outline-offset: -3px; }
-            .message-notification-open:active { transform: scale(.99); }
-            .message-notification-open:disabled { cursor: default; }
+            .message-notification-content { min-width: 0; padding: 7px 0 7px 10px; }
             .message-notification-header {
-                display: flex; min-width: 0; grid-column: 1 / -1;
-                align-items: center; gap: 9px; padding-right: 58px;
+                display: flex; min-width: 0; align-items: center; gap: 8px;
             }
             .message-notification-icon {
-                display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center;
-                border: 1px solid #5b829050; border-radius: 9px;
-                color: #a4cbd3; background: #456a751e;
+                display: grid; width: 32px; height: 32px; flex: 0 0 32px;
+                place-items: center; overflow: hidden; border: 1px solid #ffffff1c;
+                border-radius: var(--radius-control); background: #ffffff0a;
             }
-            .message-notification-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-            .message-notification-heading { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-            .message-notification-eyebrow { color: #91bbc5; font: 800 8px/1.2 var(--font-ui); letter-spacing: .6px; text-transform: uppercase; }
-            .message-notification-header strong { color: #e5eef0; font: 800 12px/1.3 var(--font-ui); }
+            .message-notification-avatar { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+            .message-notification-heading { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 1px; }
+            .message-notification-eyebrow {
+                color: var(--color-text-muted); font: 700 9px/1.2 var(--font-ui);
+            }
+            .message-notification-header strong {
+                display: -webkit-box; overflow: hidden; color: var(--color-text-heading);
+                font: 750 13px/1.3 var(--font-ui); text-overflow: ellipsis;
+                -webkit-box-orient: vertical; -webkit-line-clamp: 1;
+            }
             .message-notification-copy {
-                display: -webkit-box; grid-column: 1; max-height: 2.8em; overflow: hidden; margin: 0;
-                color: #bcc9cc; font: 600 11px/1.4 var(--font-ui);
+                display: -webkit-box; max-height: 2.8em; overflow: hidden; margin: 5px 0 0 40px;
+                color: var(--color-text-description); font: 600 12px/1.4 var(--font-ui);
                 overflow-wrap: anywhere; white-space: pre-wrap; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
             }
-            .message-notification-view-icon {
-                display: grid; width: 28px; height: 28px; grid-column: 2; grid-row: 2;
-                place-items: center; border: 1px solid #5b82905c; border-radius: 8px;
-                color: #a8cbd2; background: #456a7525;
-                transition: color 160ms ease, background 160ms ease, transform 160ms ease;
+            .message-notification-actions {
+                display: flex; align-items: center; justify-content: flex-end; gap: 5px;
+                padding: 0 9px; align-self: center;
             }
-            .message-notification-open:hover .message-notification-view-icon,
-            .message-notification-open:focus-visible .message-notification-view-icon {
-                color: #e5f6f8; background: #456a7560; transform: scale(1.04);
-            }
-            .message-notification-view-icon svg {
-                width: 15px; height: 15px; fill: none; stroke: currentColor;
-                stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
-            }
-            .message-notification-mute {
-                position: absolute; z-index: 2; top: 7px; right: 42px;
-                display: grid; width: 26px; height: 26px; place-items: center; padding: 0;
-                border: 1px solid #54717a66; border-radius: 8px; color: #abc2c7;
-                background: #34444a; cursor: pointer;
-                transition: color 140ms ease, background 140ms ease, transform 140ms ease;
+            .message-notification-action {
+                display: grid; box-sizing: border-box; width: 30px; height: 30px; flex: 0 0 30px;
+                place-items: center; padding: 0; border: 1px solid #ffffff18; border-radius: 8px;
+                color: #c9c9cf; background: #ffffff08; cursor: pointer;
+                transition: color 160ms ease, background 160ms ease, border-color 160ms ease, transform 160ms ease;
                 touch-action: manipulation;
             }
-            .message-notification-mute:hover,
-            .message-notification-mute:focus-visible { color: #fff; background: #46616a; }
-            .message-notification-mute:focus-visible { outline: 2px solid #6fa7b4; outline-offset: 2px; }
-            .message-notification-mute:active { transform: scale(.92); }
-            .message-notification-mute svg {
-                width: 15px; height: 15px; fill: none; stroke: currentColor;
+            .message-notification-action:hover,
+            .message-notification-action:focus-visible {
+                border-color: #ffffff3b; color: var(--color-white); background: #ffffff14;
+            }
+            .message-notification-action:focus-visible { outline: 2px solid #b8b8bf; outline-offset: 2px; }
+            .message-notification-action:active { transform: scale(.92); }
+            .message-notification-action:disabled { opacity: .55; cursor: default; }
+            .message-notification-action svg {
+                display: block; width: 16px; height: 16px; fill: none; stroke: currentColor;
                 stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
             }
-            .message-notification-mute[hidden] { display: none; }
-            .message-notification-close { position: absolute; z-index: 2; top: 5px; right: 5px; width: 30px; height: 30px; }
-            .message-notification-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: #ffffff12; }
-            .message-notification-progress-fill {
-                display: block; width: 100%; height: 100%; background: linear-gradient(90deg, #4a8290, #9bcbd3);
-                transform-origin: left center;
-            }
+            .message-notification-close { font: 500 18px/1 var(--font-ui); }
+            .message-notification-action[hidden] { display: none; }
+            .message-notification-progress { position: absolute; right: 0; bottom: 0; left: 0; height: 1px; background: #ffffff08; }
+            .message-notification-progress-fill { display: block; width: 100%; height: 100%; background: #a9a9b0; transform-origin: left center; }
             .message-notification-progress-fill.is-running {
                 animation: message-notification-countdown ${MESSAGE_NOTIFICATION_DURATION_MS}ms linear forwards;
             }
             @keyframes message-notification-enter {
-                from { opacity: 0; filter: blur(3px); transform: translateY(-8px) scale(.98); }
-                to { opacity: 1; filter: blur(0); transform: translateY(0) scale(1); }
+                from { opacity: 0; transform: translateY(-8px); }
+                to { opacity: 1; transform: translateY(0); }
             }
             @keyframes message-notification-exit {
-                to { opacity: 0; filter: blur(2px); transform: translateY(-6px) scale(.98); }
+                to { opacity: 0; transform: translateY(-5px); }
             }
             @keyframes message-notification-countdown {
                 from { transform: scaleX(1); }
@@ -2436,8 +2783,25 @@
             @media (prefers-reduced-motion: reduce) {
                 .message-notification-toast.is-entering, .message-notification-toast.is-closing,
                 .message-notification-progress-fill.is-running { animation: none; }
-                .message-notification-open, .message-notification-view-icon,
-                .message-notification-mute { transition: none; }
+                .message-notification-action { transition: none; }
+            }
+            @media (max-width: 480px) {
+                .message-notification-stack {
+                    width: calc(100vw - 16px); max-height: min(270px, calc(100vh - 16px));
+                    max-height: min(270px, calc(100dvh - 16px));
+                }
+                .message-notification-stack.is-top-right {
+                    top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right));
+                }
+                .message-notification-stack.is-top-left {
+                    top: max(8px, env(safe-area-inset-top)); left: max(8px, env(safe-area-inset-left));
+                }
+                .message-notification-stack.is-bottom-right {
+                    right: max(8px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom));
+                }
+                .message-notification-stack.is-bottom-left {
+                    bottom: max(8px, env(safe-area-inset-bottom)); left: max(8px, env(safe-area-inset-left));
+                }
             }
             .report-details-layer { z-index: 7; background: rgba(0, 0, 0, 0.46); }
             .report-details-layer[hidden] { display: none; }
@@ -2455,7 +2819,7 @@
                 border-bottom: 1px solid var(--color-surface-muted); background: var(--color-menu-header);
             }
             .report-history-tabs {
-                display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px;
+                display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px;
                 margin: 0 0 12px; padding: 4px; border: 1px solid #343438;
                 border-radius: var(--radius-medium); background: #1d1d20;
                 box-shadow: inset 0 1px 2px #0005;
@@ -2825,15 +3189,17 @@
                 transition-delay: 0s;
             }
             @media (prefers-reduced-motion: reduce) {
-                .info-dialog, .changelog-dialog, .settings-dialog, .report-dialog, .report-history-dialog, .messages-dialog, .report-details-dialog, .verification-layer, .verification-dialog, .update-method-dialog, .reason-options,
-                .popup-layer.is-closing, .popup-layer.is-closing > .info-dialog, .popup-layer.is-closing > .changelog-dialog, .popup-layer.is-closing > .settings-dialog,
+                .info-dialog, .changelog-dialog, .settings-dialog, .error-log-dialog, .report-dialog, .report-history-dialog, .messages-dialog, .report-details-dialog, .verification-layer, .verification-dialog, .update-method-dialog, .reason-options,
+                .popup-layer.is-closing, .popup-layer.is-closing > .info-dialog, .popup-layer.is-closing > .changelog-dialog, .popup-layer.is-closing > .settings-dialog, .popup-layer.is-closing > .error-log-dialog,
                 .popup-layer.is-closing > .report-dialog, .popup-layer.is-closing > .report-history-dialog, .popup-layer.is-closing > .messages-dialog, .popup-layer.is-closing > .report-details-dialog, .popup-layer.is-closing > .verification-dialog, .popup-layer.is-closing > .update-method-dialog,
                 .popup-layer.is-closing > .menu-call-link-dialog,
                 .popup-layer:not(.is-closing), .popup-layer:not(.is-closing) > .info-dialog, .popup-layer:not(.is-closing) > .changelog-dialog,
-                .popup-layer:not(.is-closing) > .settings-dialog, .popup-layer:not(.is-closing) > .report-dialog,
+                .popup-layer:not(.is-closing) > .settings-dialog, .popup-layer:not(.is-closing) > .error-log-dialog, .popup-layer:not(.is-closing) > .report-dialog,
                 .popup-layer:not(.is-closing) > .report-history-dialog, .popup-layer:not(.is-closing) > .messages-dialog, .popup-layer:not(.is-closing) > .report-details-dialog, .popup-layer:not(.is-closing) > .verification-dialog, .popup-layer:not(.is-closing) > .update-method-dialog,
                 .popup-layer:not(.is-closing) > .menu-call-link-dialog,
                 .panel.open, .panel.open .main, .panel.is-closing, .panel.is-closing .main { animation: none; }
+                .messages-row.is-new, .messages-row.is-new .messages-entry { animation: none; }
+                .messages-input, .messages-send { transition: none; }
                 .button-pressable, .reason-control,
                 .launcher-call-kbi.button-pressable,
                 .launcher-quick-messages,
@@ -2909,10 +3275,13 @@
             }
             @media (max-width: 560px) {
                 .report-history-dialog { padding: 14px; }
-                .messages-dialog { width: min(720px, calc(100vw - 24px)); padding: 14px; }
+                .error-log-dialog { padding: 14px; }
+                .error-log-header { margin: -14px -14px 10px; }
+                .settings-log-launcher { align-items: flex-start; }
+                .messages-dialog { width: min(760px, calc(100vw - 24px)); padding: 14px; }
                 .messages-header { margin: -14px -14px 12px; }
                 .messages-list {
-                    min-height: min(220px, 28vh); max-height: min(48vh, 560px); padding: 12px 10px;
+                    min-height: min(240px, 30vh); max-height: min(50vh, 600px); padding: 12px 10px;
                 }
                 .messages-header-actions { gap: 4px; }
                 .messages-tool-button { width: 32px; height: 32px; }
@@ -3238,12 +3607,57 @@
                             </span>
                             <input class="settings-checkbox" data-setting="showMessageNotifications" type="checkbox" aria-label="Show incoming message notifications">
                         </div>
+                        <div class="settings-row">
+                            <span class="settings-copy">
+                                <span class="settings-label" id="settings-message-notification-position-label">Message notification position</span>
+                                <span class="settings-default">Default: Top right</span>
+                            </span>
+                            <div class="reason-select settings-position-select">
+                                <button class="reason-trigger" id="settings-message-notification-position"
+                                    data-setting="messageNotificationPosition" type="button" aria-haspopup="listbox"
+                                    aria-controls="settings-message-notification-options" aria-expanded="false"
+                                    aria-labelledby="settings-message-notification-position-label settings-message-notification-position-value">
+                                    <span class="reason-trigger-label" id="settings-message-notification-position-value">Top right</span>
+                                    <span class="reason-chevron" aria-hidden="true">▼</span>
+                                </button>
+                                <div class="reason-options settings-position-options" id="settings-message-notification-options"
+                                    role="listbox" aria-label="Message notification position" hidden>
+                                    <button class="reason-option settings-position-option" type="button" role="option"
+                                        aria-selected="true" data-position="top-right">
+                                        <span class="settings-position-option-label">Top right</span>
+                                        <span class="reason-option-check settings-position-check" aria-hidden="true"></span>
+                                    </button>
+                                    <button class="reason-option settings-position-option" type="button" role="option"
+                                        aria-selected="false" data-position="top-left">
+                                        <span class="settings-position-option-label">Top left</span>
+                                        <span class="reason-option-check settings-position-check" aria-hidden="true"></span>
+                                    </button>
+                                    <button class="reason-option settings-position-option" type="button" role="option"
+                                        aria-selected="false" data-position="bottom-right">
+                                        <span class="settings-position-option-label">Bottom right</span>
+                                        <span class="reason-option-check settings-position-check" aria-hidden="true"></span>
+                                    </button>
+                                    <button class="reason-option settings-position-option" type="button" role="option"
+                                        aria-selected="false" data-position="bottom-left">
+                                        <span class="settings-position-option-label">Bottom left</span>
+                                        <span class="reason-option-check settings-position-check" aria-hidden="true"></span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                         <div class="settings-row" data-setting-row="announceRoomJoin">
                             <span class="settings-copy">
                                 <span class="settings-label">Announce Kour Report when joining a room</span>
                                 <span class="settings-default">Default: On · Invite players to search Google for Kour Report or join Discord</span>
                             </span>
                             <input class="settings-checkbox" data-setting="announceRoomJoin" type="checkbox" aria-label="Announce Kour Report when joining a room" aria-describedby="room-announcement-tooltip">
+                        </div>
+                        <div class="settings-row">
+                            <span class="settings-copy">
+                                <span class="settings-label">Announce successful player reports in chat</span>
+                                <span class="settings-default">Default: On · Announce once per player in each room after a successful report or KBI call</span>
+                            </span>
+                            <input class="settings-checkbox" data-setting="announcePlayerReports" type="checkbox" aria-label="Announce successful player reports in chat">
                         </div>
                         <div class="settings-row">
                             <span class="settings-copy">
@@ -3282,6 +3696,14 @@
                             </span>
                             <input class="settings-checkbox" data-setting="testMode" type="checkbox" aria-label="Enable test submission mode" aria-describedby="test-mode-tooltip">
                         </div>
+                        <div class="settings-log-launcher">
+                            <span class="settings-copy">
+                                <span class="settings-label">Error logs</span>
+                                <span class="settings-default">Review the latest 100 entries; up to 300 are saved on this device.</span>
+                                <span class="settings-log-count" data-log-count>0 logs</span>
+                            </span>
+                            <button class="error-log-action" data-log-open type="button">Open logs</button>
+                        </div>
                         <p class="settings-key-hint" role="status" hidden></p>
                         <button class="settings-reset" type="button">RESET DEFAULT</button>
                     </div>
@@ -3290,6 +3712,24 @@
                 <div class="tooltip settings-test-mode-tooltip" id="test-mode-tooltip" role="tooltip" hidden>Test mode routes all submissions—including player reports, manual reports, and every KBI call—to the public Discord test channel using https://kour-report-api.kourkbi.workers.dev/api/v2/report/test. Test submissions are not saved to the API's production report history, and their report IDs may not be unique. Turn this off before sending real reports.</div>
                 <div class="tooltip settings-client-token-tooltip" id="client-token-tooltip" role="tooltip" hidden>This token is used to securely send reports and communicate with KBI staff. Under no circumstances should you share it with anyone.</div>
                 <div class="tooltip settings-announcement-tooltip" id="room-announcement-tooltip" role="tooltip" data-preserve-markup hidden><strong>Important:</strong> Please support us by keeping this option enabled. It helps more players report hackers and clean up the room.</div>
+            </div>
+            <div class="error-log-layer popup-layer" hidden>
+                <section class="error-log-dialog" role="dialog" aria-modal="true" aria-labelledby="error-log-title">
+                    <header class="error-log-header dialog-header">
+                        <button class="error-log-close dialog-close" type="button" aria-label="Close error logs">×</button>
+                        <h2 class="dialog-title" id="error-log-title">Kour Report error logs</h2>
+                    </header>
+                    <p class="error-log-description">Errors are highlighted in red. Warnings and regular logs use the menu's standard colors.</p>
+                    <div class="error-log-toolbar">
+                        <span class="error-log-count" data-log-count>0 logs</span>
+                        <span class="error-log-actions">
+                            <button class="error-log-action" data-log-copy type="button">Copy all</button>
+                            <button class="error-log-action" data-log-clear type="button">Clear</button>
+                        </span>
+                    </div>
+                    <div class="error-log-list" data-log-list role="log" aria-live="off" aria-label="Kour Report diagnostic logs"></div>
+                    <p class="error-log-status" data-log-status role="status" aria-live="polite"></p>
+                </section>
             </div>
             <div class="report-dialog-layer popup-layer" hidden>
                 <section class="report-dialog" role="dialog" aria-modal="true" aria-labelledby="report-dialog-title">
@@ -3367,29 +3807,36 @@
         <div class="message-notification-stack" aria-live="polite" aria-relevant="additions" hidden></div>
         <template class="message-notification-template">
             <div class="message-notification-toast" role="status" aria-atomic="true">
-                <button class="message-notification-open" type="button" aria-label="Open new message from KBI">
+                <div class="message-notification-content">
                     <span class="message-notification-header">
                         <span class="message-notification-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+                            <img class="message-notification-avatar" alt="">
                         </span>
                         <span class="message-notification-heading">
-                            <span class="message-notification-eyebrow">Personal message</span>
+                            <span class="message-notification-eyebrow">Kour Report</span>
                             <strong>New message from KBI</strong>
                         </span>
                     </span>
                     <span class="message-notification-copy"></span>
-                    <span class="message-notification-view-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
-                    </span>
-                </button>
-                <button class="message-notification-mute" type="button" aria-label="Mute message notifications"
-                    title="Mute message notifications">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M11 5 6 9H3v6h3l5 4V5Z"/>
-                        <path d="m16 9 5 6m0-6-5 6"/>
-                    </svg>
-                </button>
-                <button class="message-notification-close dialog-close" type="button" aria-label="Dismiss message notification">×</button>
+                </div>
+                <div class="message-notification-actions">
+                    <button class="message-notification-action message-notification-close" type="button"
+                        aria-label="Dismiss message notification" title="Dismiss">×</button>
+                    <button class="message-notification-action message-notification-mute" type="button"
+                        aria-label="Mute message notifications" title="Mute message notifications">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M11 5 6 9H3v6h3l5 4V5Z"/>
+                            <path d="m16 9 5 6m0-6-5 6"/>
+                        </svg>
+                    </button>
+                    <button class="message-notification-action message-notification-open" type="button"
+                        aria-label="Open new message from KBI" title="View message">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"/>
+                            <circle cx="12" cy="12" r="2.5"/>
+                        </svg>
+                    </button>
+                </div>
                 <div class="message-notification-progress" aria-hidden="true">
                     <span class="message-notification-progress-fill"></span>
                 </div>
@@ -3402,14 +3849,11 @@
                     <h2 class="report-history-title dialog-title" id="report-history-title">Report history</h2>
                 </header>
                 <div class="report-history-tabs" role="group" aria-label="Filter report history">
-                    <button class="report-history-tab" type="button" data-report-history-filter="all" aria-pressed="true">
-                        <span>All</span><span class="report-history-tab-count" data-report-history-count="all">0</span>
-                    </button>
                     <button class="report-history-tab" type="button" data-report-history-filter="real" aria-pressed="false">
-                        <span>Real</span><span class="report-history-tab-count" data-report-history-count="real">0</span>
+                        <span>Real reports</span><span class="report-history-tab-count" data-report-history-count="real">0</span>
                     </button>
                     <button class="report-history-tab" type="button" data-report-history-filter="test" aria-pressed="false">
-                        <span>Test</span><span class="report-history-tab-count" data-report-history-count="test">0</span>
+                        <span>Test reports</span><span class="report-history-tab-count" data-report-history-count="test">0</span>
                     </button>
                 </div>
                 <div class="report-history-tools">
@@ -3456,7 +3900,6 @@
                         <button class="messages-close dialog-close" type="button" aria-label="Close messages">×</button>
                     </div>
                 </header>
-                <p class="messages-description">Personalized messages delivered to this client appear here.</p>
                 <p class="messages-empty">You don't have any messages yet.</p>
                 <div class="messages-list" role="list" aria-label="Personalized messages"></div>
                 <form class="messages-compose">
@@ -3471,8 +3914,8 @@
                         </svg>
                     </button>
                 </form>
-                <p class="messages-status" role="status" aria-live="polite"></p>
             </section>
+            <div class="messages-action-menu-layer"></div>
             <div class="messages-settings-layer" id="messages-settings-layer" hidden>
                 <section class="messages-settings-dialog" role="dialog" aria-modal="true"
                     aria-labelledby="messages-settings-title">
@@ -3915,6 +4358,9 @@
     const infoDialogCloseButton = shadow.querySelector(".info-dialog-close");
     const settingsLayer = shadow.querySelector(".settings-layer");
     const settingsCloseButton = shadow.querySelector(".settings-close");
+    const errorLogLayer = shadow.querySelector(".error-log-layer");
+    const errorLogCloseButton = shadow.querySelector(".error-log-close");
+    const settingsLogOpenButton = shadow.querySelector("[data-log-open]");
     const settingsKeyButtons = {
         openKey: shadow.querySelector('[data-key-setting="openKey"]'),
         toggleIconKey: shadow.querySelector('[data-key-setting="toggleIconKey"]'),
@@ -3922,10 +4368,12 @@
     const settingsHideIconWarning = shadow.querySelector("[data-hide-icon-warning]");
     const settingsHideIconRow = shadow.querySelector('[data-setting-row="hideIcon"]');
     const settingsTestModeRow = shadow.querySelector('[data-setting-row="testMode"]');
+    const settingsTestModeHelp = settingsTestModeRow.querySelector(".settings-help");
     const settingsTestModeTooltip = shadow.querySelector("#test-mode-tooltip");
     const settingsAnnouncementRow = shadow.querySelector('[data-setting-row="announceRoomJoin"]');
     const settingsAnnouncementTooltip = shadow.querySelector("#room-announcement-tooltip");
     const settingsClientTokenRow = shadow.querySelector("[data-client-token-row]");
+    const settingsClientTokenHelp = settingsClientTokenRow.querySelector(".settings-help");
     const settingsClientTokenTooltip = shadow.querySelector("#client-token-tooltip");
     const settingsClientTokenValue = shadow.querySelector("[data-client-token-value]");
     const settingsClientTokenToggleButton = shadow.querySelector("[data-client-token-toggle]");
@@ -3934,6 +4382,15 @@
     const settingsClientTokenStatus = shadow.querySelector("[data-client-token-status]");
     const roomAnnouncementSendButton = shadow.querySelector("[data-room-announcement-send]");
     const roomAnnouncementSendStatus = shadow.querySelector("[data-room-announcement-status]");
+    const kourLogCounts = [...shadow.querySelectorAll("[data-log-count]")];
+    const kourLogList = shadow.querySelector("[data-log-list]");
+    const kourLogStatus = shadow.querySelector("[data-log-status]");
+    const kourLogCopyButton = shadow.querySelector("[data-log-copy]");
+    const kourLogClearButton = shadow.querySelector("[data-log-clear]");
+    kourLogListElement = kourLogList;
+    kourLogCountElements = kourLogCounts;
+    loadKourLogEntries();
+    renderKourLogViewer();
     const settingsKeyHint = shadow.querySelector(".settings-key-hint");
     const settingsResetButton = shadow.querySelector(".settings-reset");
     const settingsInputs = {
@@ -3945,10 +4402,15 @@
         testMode: shadow.querySelector('[data-setting="testMode"]'),
         showUpdateNotifications: shadow.querySelector('[data-setting="showUpdateNotifications"]'),
         showMessageNotifications: shadow.querySelector('[data-setting="showMessageNotifications"]'),
+        messageNotificationPosition: shadow.querySelector('[data-setting="messageNotificationPosition"]'),
         announceRoomJoin: shadow.querySelector('[data-setting="announceRoomJoin"]'),
+        announcePlayerReports: shadow.querySelector('[data-setting="announcePlayerReports"]'),
         opacity: shadow.querySelector('[data-setting="opacity"]'),
         size: shadow.querySelector('[data-setting="size"]'),
     };
+    const settingsPositionSelect = settingsInputs.messageNotificationPosition.parentElement;
+    const settingsPositionOptionsMenu = settingsPositionSelect.querySelector(".settings-position-options");
+    const settingsPositionOptions = [...settingsPositionOptionsMenu.querySelectorAll(".settings-position-option")];
     shadow.querySelectorAll(".contributor-avatar").forEach((avatar) => {
         avatar.src = PLAYER_AVATAR_URL;
     });
@@ -3994,6 +4456,7 @@
     const messagesButton = shadow.querySelector(".messages-button");
     const messagesCount = shadow.querySelector(".messages-count");
     const messagesLayer = shadow.querySelector(".messages-layer");
+    const messagesActionMenuLayer = shadow.querySelector(".messages-action-menu-layer");
     const messagesCloseButton = shadow.querySelector(".messages-close");
     const messagesIdentityToggle = shadow.querySelector(".messages-identity-toggle");
     const messagesSettingsLayer = shadow.querySelector(".messages-settings-layer");
@@ -4006,6 +4469,10 @@
     const messagesSenderInput = shadow.querySelector(".messages-sender-input");
     const messagesIdentityCancelButton = shadow.querySelector(".messages-identity-cancel");
     const messagesIdentitySaveButton = shadow.querySelector(".messages-identity-save");
+    reportPageWindow.addEventListener(
+        "kour-report-match-players",
+        refreshDetectedMessageIdentity
+    );
     const messagesClearButton = shadow.querySelector(".messages-clear");
     const messagesClearConfirmation = shadow.querySelector(".messages-clear-confirmation");
     const messagesClearCancel = shadow.querySelector(".messages-clear-cancel");
@@ -4015,7 +4482,7 @@
     const messagesCompose = shadow.querySelector(".messages-compose");
     const messagesInput = shadow.querySelector(".messages-input");
     const messagesSendButton = shadow.querySelector(".messages-send");
-    const messagesStatus = shadow.querySelector(".messages-status");
+    let activeMessageActionMenu = null;
     const messageNotificationStack = shadow.querySelector(".message-notification-stack");
     const messageNotificationTemplate = shadow.querySelector(".message-notification-template");
     const reportHistoryButton = shadow.querySelector(".report-history-button");
@@ -4073,6 +4540,8 @@
     let pendingCallPlayerKey = null;
     let pendingMessageCaptcha = null;
     let messageSendingInProgress = false;
+    let activeOutgoingMessageId = null;
+    const outgoingMessageQueue = [];
     let pendingMenuCallPlayer = null;
     let reportedPlayerKey = null;
     let manualReport = false;
@@ -4086,7 +4555,7 @@
     const shownReportReminderKeys = new Set();
     let reportReminderTimer = 0;
     let reportHistory = loadReportHistory();
-    let reportHistoryFilter = "all";
+    let reportHistoryFilter = "real";
     customMessages = loadCustomMessages();
     updateMessagesUI();
     const exitTimers = new WeakMap();
@@ -4107,6 +4576,15 @@
      */
     const LAUNCHER_SETTINGS_STORAGE_KEY = "kourReportLauncherSettings";
     const LEGACY_LAUNCHER_SETTINGS_STORAGE_KEY = "kourReportsLauncherSettings";
+    const PLAYER_REPORT_ANNOUNCEMENTS_STORAGE_KEY = "kourReportPlayerChatAnnouncements";
+    const MESSAGE_NOTIFICATION_POSITIONS = Object.freeze([
+        "top-right",
+        "top-left",
+        "bottom-right",
+        "bottom-left",
+    ]);
+    const announcedPlayerReportKeys = new Set();
+    let playerReportAnnouncementKeysLoaded = false;
     const DEFAULT_LAUNCHER_SETTINGS = {
         moveIcon: false,
         hideIcon: false,
@@ -4116,7 +4594,9 @@
         testMode: false,
         showUpdateNotifications: true,
         showMessageNotifications: true,
+        messageNotificationPosition: "top-right",
         announceRoomJoin: true,
+        announcePlayerReports: true,
         opacity: 100,
         size: 72,
         openKey: "AltLeft",
@@ -4207,7 +4687,8 @@
                     ? item.direction
                     : "incoming";
                 if (direction === "activity") {
-                    return typeof item.activityKind === "string" &&
+                    return typeof item.testMode === "boolean" && !item.testMode &&
+                        typeof item.activityKind === "string" &&
                         ["manual-report", "player-report", "kbi-call"].includes(item.activityKind) &&
                         typeof item.target === "string" && item.target.length <= 1000 &&
                         (item.targetRawName === undefined ||
@@ -4220,8 +4701,7 @@
                         (item.sessionLink === undefined || (typeof item.sessionLink === "string" && item.sessionLink.length <= 1000)) &&
                         (item.reportId === null || typeof item.reportId === "string") &&
                         (item.clientToken === undefined ||
-                            (typeof item.clientToken === "string" && item.clientToken.length <= 100)) &&
-                        typeof item.testMode === "boolean";
+                            (typeof item.clientToken === "string" && item.clientToken.length <= 100));
                 }
                 if (direction === "incoming") {
                     return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.messageId);
@@ -4287,19 +4767,34 @@
         }
     }
 
+    function isBlockedClientMessageError(errorLog) {
+        if (!errorLog || typeof errorLog !== "object") return false;
+        const code = typeof errorLog.code === "string" ? errorLog.code : "";
+        if (/(?:^|_)CLIENT_BLOCKED$/i.test(code)) return true;
+        const description = [errorLog.message, errorLog.details]
+            .filter((value) => typeof value === "string")
+            .join(" ");
+        return errorLog.httpStatus === 403 &&
+            /\bclient\b/i.test(description) &&
+            /\bblocked\b/i.test(description);
+    }
+
     function renderOutgoingMessageStatus(element, item) {
         const status = item.status === "error"
             ? "error"
             : item.status === "sending"
                 ? "sending"
                 : "sent";
+        const clientBlocked = status === "error" && isBlockedClientMessageError(item.errorLog);
         const statusLabel = status === "error"
-            ? `Message not sent: ${item.error || "Could not send"}`
+            ? clientBlocked
+                ? "Message not sent because this client is blocked."
+                : `Message not sent: ${item.error || "Could not send"}`
             : status === "sending" ? "Sending message" : "Message sent";
         const statusText = status === "error"
-            ? "Not sent"
+            ? clientBlocked ? "Not sent: client blocked" : "Not sent"
             : status === "sending" ? "Sending…" : "Sent";
-        element.className = `messages-entry-status is-${status}`;
+        element.className = `messages-entry-status is-${status}${clientBlocked ? " is-blocked" : ""}`;
         element.setAttribute("role", "status");
         element.setAttribute("aria-live", "polite");
         element.setAttribute("aria-label", statusLabel);
@@ -4392,6 +4887,7 @@
             } else {
                 collapse();
             }
+            positionActiveMessageActionMenu();
         });
         revealButton.addEventListener("click", () => {
             const currentItem = findCurrentItem();
@@ -4428,21 +4924,107 @@
         return { toggleButton, panel, collapse };
     }
 
-    function closeOtherMessageActionMenus(actions) {
-        messagesList.querySelectorAll(".messages-entry-actions").forEach((otherActions) => {
-            if (otherActions === actions) return;
-            const otherTokenButton = otherActions.querySelector(".messages-entry-token-toggle");
-            if (otherTokenButton && otherTokenButton.getAttribute("aria-expanded") === "true") {
-                otherTokenButton.click();
+    function positionActiveMessageActionMenu() {
+        const active = activeMessageActionMenu;
+        if (!active || !active.panel || active.panel.hidden ||
+            !messagesActionMenuLayer.contains(active.panel)) return;
+        const anchor = active.moreButton.getBoundingClientRect();
+        const panel = active.panel;
+        panel.style.left = "0px";
+        panel.style.top = "0px";
+        const bounds = panel.getBoundingClientRect();
+        const margin = 12;
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const maxLeft = Math.max(margin, viewportWidth - bounds.width - margin);
+        const alignRight = active.row.classList.contains("is-outgoing") ||
+            active.row.classList.contains("is-activity");
+        const preferredLeft = alignRight ? anchor.right - bounds.width : anchor.left;
+        const left = Math.max(margin, Math.min(maxLeft, preferredLeft));
+        const spaceBelow = viewportHeight - anchor.bottom - margin;
+        const spaceAbove = anchor.top - margin;
+        const openBelow = bounds.height <= spaceBelow || spaceBelow >= spaceAbove;
+        const preferredTop = openBelow ? anchor.bottom + 5 : anchor.top - bounds.height - 5;
+        const maxTop = Math.max(margin, viewportHeight - bounds.height - margin);
+        const top = Math.max(margin, Math.min(maxTop, preferredTop));
+        panel.style.left = `${Math.round(left)}px`;
+        panel.style.top = `${Math.round(top)}px`;
+    }
+
+    function closeMessageActionMenu(actions) {
+        const active = activeMessageActionMenu;
+        if (active && (!actions || active.actions === actions)) {
+            const tokenButton = active.menu.querySelector(".messages-entry-token-toggle");
+            if (tokenButton && tokenButton.getAttribute("aria-expanded") === "true") {
+                tokenButton.click();
             }
-            const otherMenu = otherActions.querySelector(".messages-entry-menu");
-            if (otherMenu) otherMenu.hidden = true;
-            const otherDeleteConfirmation = otherActions.querySelector(".messages-entry-delete-confirm");
-            if (otherDeleteConfirmation) otherDeleteConfirmation.hidden = true;
-            const otherMoreButton = otherActions.querySelector(".messages-entry-more");
-            if (otherMoreButton) otherMoreButton.setAttribute("aria-expanded", "false");
-            const otherRow = otherActions.closest(".messages-row");
-            if (otherRow) otherRow.style.zIndex = "";
+            active.menu.hidden = true;
+            active.menu.classList.remove("is-portal");
+            active.menu.style.removeProperty("left");
+            active.menu.style.removeProperty("top");
+            active.actions.appendChild(active.menu);
+            if (active.deleteConfirmation) {
+                active.deleteConfirmation.hidden = true;
+                active.deleteConfirmation.classList.remove("is-portal");
+                active.deleteConfirmation.style.removeProperty("left");
+                active.deleteConfirmation.style.removeProperty("top");
+                active.actions.appendChild(active.deleteConfirmation);
+            }
+            active.moreButton.setAttribute("aria-expanded", "false");
+            active.row.style.zIndex = "";
+            activeMessageActionMenu = null;
+            return;
+        }
+        if (!actions) return;
+        const menu = actions.querySelector(".messages-entry-menu");
+        if (menu) {
+            menu.hidden = true;
+            menu.classList.remove("is-portal");
+            menu.style.removeProperty("left");
+            menu.style.removeProperty("top");
+        }
+        const deleteConfirmation = actions.querySelector(".messages-entry-delete-confirm");
+        if (deleteConfirmation) {
+            deleteConfirmation.hidden = true;
+            deleteConfirmation.classList.remove("is-portal");
+            deleteConfirmation.style.removeProperty("left");
+            deleteConfirmation.style.removeProperty("top");
+        }
+        const moreButton = actions.querySelector(".messages-entry-more");
+        if (moreButton) moreButton.setAttribute("aria-expanded", "false");
+        const row = actions.closest(".messages-row");
+        if (row) row.style.zIndex = "";
+    }
+
+    function openMessageActionMenu(actions, moreButton, row, menu, deleteConfirmation = null) {
+        closeOtherMessageActionMenus(actions);
+        menu.hidden = false;
+        menu.classList.add("is-portal");
+        messagesActionMenuLayer.appendChild(menu);
+        if (deleteConfirmation) {
+            deleteConfirmation.hidden = true;
+            deleteConfirmation.classList.add("is-portal");
+            messagesActionMenuLayer.appendChild(deleteConfirmation);
+        }
+        activeMessageActionMenu = {
+            actions,
+            moreButton,
+            row,
+            menu,
+            deleteConfirmation,
+            panel: menu,
+        };
+        moreButton.setAttribute("aria-expanded", "true");
+        row.style.zIndex = "10";
+        positionActiveMessageActionMenu();
+    }
+
+    function closeOtherMessageActionMenus(actions) {
+        if (activeMessageActionMenu && activeMessageActionMenu.actions !== actions) {
+            closeMessageActionMenu(activeMessageActionMenu.actions);
+        }
+        messagesList.querySelectorAll(".messages-entry-actions").forEach((otherActions) => {
+            if (otherActions !== actions) closeMessageActionMenu(otherActions);
         });
     }
 
@@ -4466,10 +5048,25 @@
     }
 
     function renderMessages() {
-        const existingMessageIds = new Set(
-            [...messagesList.querySelectorAll("[data-message-id]")].map((element) => element.dataset.messageId)
-        );
+        if (activeMessageActionMenu) closeMessageActionMenu(activeMessageActionMenu.actions);
+        const existingEntries = [...messagesList.querySelectorAll("[data-message-id]")];
+        const existingMessageIds = new Set(existingEntries.map((element) => element.dataset.messageId));
+        const previousScrollTop = messagesList.scrollTop;
+        const listBounds = messagesList.getBoundingClientRect();
+        const scrollAnchor = !messagesLayer.hidden
+            ? existingEntries.find((element) => {
+                const bounds = element.getBoundingClientRect();
+                return bounds.bottom > listBounds.top && bounds.top < listBounds.bottom;
+            })
+            : null;
+        const scrollAnchorId = scrollAnchor?.dataset.messageId || "";
+        const scrollAnchorOffset = scrollAnchor
+            ? scrollAnchor.getBoundingClientRect().top - listBounds.top
+            : 0;
+        const wasNearLatest = messagesList.scrollHeight - messagesList.scrollTop -
+            messagesList.clientHeight <= 48;
         const hasNewMessages = customMessages.some((item) => !existingMessageIds.has(item.messageId));
+        const shouldFollowLatest = hasNewMessages && wasNearLatest;
         messagesList.replaceChildren();
         messagesEmpty.hidden = customMessages.length > 0;
         messagesList.hidden = customMessages.length === 0;
@@ -4599,22 +5196,26 @@
                 addButtonPressAnimation(copyReportIdButton);
                 moreButton.addEventListener("click", () => {
                     const opening = menu.hidden;
-                    if (!opening) tokenDisclosure.collapse();
-                    closeOtherMessageActionMenus(actions);
-                    menu.hidden = !opening;
-                    moreButton.setAttribute("aria-expanded", String(opening));
-                    row.style.zIndex = opening ? "10" : "";
+                    if (opening) {
+                        openMessageActionMenu(actions, moreButton, row, menu);
+                    } else {
+                        tokenDisclosure.collapse();
+                        closeMessageActionMenu(actions);
+                    }
                 });
                 copyReportIdButton.addEventListener("click", async () => {
                     if (!item.reportId) return;
                     try {
                         await writeTextToClipboard(item.reportId);
                         copyReportIdButton.textContent = "Copied";
-                        messagesStatus.textContent = "Report ID copied to clipboard.";
+                        logMessageFeedback("Report ID copied to clipboard.");
+                        closeMessageActionMenu(actions);
                     } catch (error) {
-                        console.warn("[Kour Report] Could not copy the report ID from message history:", error);
+                        logMessageFeedback(
+                            `Could not copy the report ID from message history: ${error instanceof Error ? error.message : String(error)}`,
+                            "error"
+                        );
                         copyReportIdButton.textContent = "Copy failed";
-                        messagesStatus.textContent = "Could not copy the report ID.";
                     }
                 });
                 entry.append(visual, content, actions);
@@ -4730,6 +5331,7 @@
                     errorLogPanel.hidden = !errorLogPanel.hidden;
                     errorLogToggle.setAttribute("aria-expanded", String(!errorLogPanel.hidden));
                     errorLogToggle.textContent = errorLogPanel.hidden ? "View error log" : "Hide error log";
+                    positionActiveMessageActionMenu();
                 });
                 addButtonPressAnimation(errorLogToggle);
             }
@@ -4782,37 +5384,35 @@
             entryActionButtons.forEach((button) => addButtonPressAnimation(button));
             moreButton.addEventListener("click", () => {
                 const opening = menu.hidden;
-                if (!opening && tokenDisclosure) tokenDisclosure.collapse();
-                closeOtherMessageActionMenus(actions);
-                menu.hidden = !opening;
-                deleteConfirmation.hidden = true;
-                moreButton.setAttribute("aria-expanded", String(opening));
-                row.style.zIndex = opening ? "10" : "";
+                if (opening) {
+                    openMessageActionMenu(actions, moreButton, row, menu, deleteConfirmation);
+                    return;
+                }
+                if (tokenDisclosure) tokenDisclosure.collapse();
+                closeMessageActionMenu(actions);
             });
             copyMessageButton.addEventListener("click", async () => {
                 try {
                     await writeTextToClipboard(item.message);
-                    messagesStatus.textContent = "Message copied to clipboard.";
-                    menu.hidden = true;
-                    moreButton.setAttribute("aria-expanded", "false");
-                    if (tokenDisclosure) tokenDisclosure.collapse();
-                    row.style.zIndex = "";
+                    logMessageFeedback("Message copied to clipboard.");
+                    closeMessageActionMenu(actions);
                 } catch (error) {
-                    console.warn("[Kour Report] Could not copy message:", error);
-                    messagesStatus.textContent = "Could not copy the message.";
+                    logMessageFeedback(
+                        `Could not copy message: ${error instanceof Error ? error.message : String(error)}`,
+                        "error"
+                    );
                 }
             });
             copyIdButton.addEventListener("click", async () => {
                 try {
                     await writeTextToClipboard(item.messageId);
-                    messagesStatus.textContent = "Message ID copied to clipboard.";
-                    menu.hidden = true;
-                    moreButton.setAttribute("aria-expanded", "false");
-                    if (tokenDisclosure) tokenDisclosure.collapse();
-                    row.style.zIndex = "";
+                    logMessageFeedback("Message ID copied to clipboard.");
+                    closeMessageActionMenu(actions);
                 } catch (error) {
-                    console.warn("[Kour Report] Could not copy message ID:", error);
-                    messagesStatus.textContent = "Could not copy the message ID.";
+                    logMessageFeedback(
+                        `Could not copy message ID: ${error instanceof Error ? error.message : String(error)}`,
+                        "error"
+                    );
                 }
             });
             deleteButton.addEventListener("click", () => {
@@ -4820,12 +5420,20 @@
                 deleteConfirmation.hidden = false;
                 moreButton.setAttribute("aria-expanded", "true");
                 if (tokenDisclosure) tokenDisclosure.collapse();
+                if (activeMessageActionMenu && activeMessageActionMenu.actions === actions) {
+                    activeMessageActionMenu.panel = deleteConfirmation;
+                    positionActiveMessageActionMenu();
+                }
                 confirmDeleteButton.focus();
             });
             cancelDeleteButton.addEventListener("click", () => {
                 deleteConfirmation.hidden = true;
                 menu.hidden = false;
                 moreButton.setAttribute("aria-expanded", "true");
+                if (activeMessageActionMenu && activeMessageActionMenu.actions === actions) {
+                    activeMessageActionMenu.panel = menu;
+                    positionActiveMessageActionMenu();
+                }
                 deleteButton.focus();
             });
             confirmDeleteButton.addEventListener("click", () => removeCustomMessage(item.messageId));
@@ -4837,9 +5445,31 @@
             }
             messagesList.appendChild(row);
         });
-        if (hasNewMessages) {
+        if (hasNewMessages || previousScrollTop > 0 || scrollAnchorId) {
             window.requestAnimationFrame(() => {
-                messagesList.scrollTop = messagesList.scrollHeight;
+                if (shouldFollowLatest) {
+                    messagesList.scrollTo({
+                        top: messagesList.scrollHeight,
+                        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                            ? "auto"
+                            : "smooth",
+                    });
+                    return;
+                }
+                if (scrollAnchorId) {
+                    const currentAnchor = [...messagesList.querySelectorAll("[data-message-id]")]
+                        .find((element) => element.dataset.messageId === scrollAnchorId);
+                    if (currentAnchor) {
+                        const currentOffset = currentAnchor.getBoundingClientRect().top -
+                            messagesList.getBoundingClientRect().top;
+                        messagesList.scrollTop += currentOffset - scrollAnchorOffset;
+                        return;
+                    }
+                }
+                messagesList.scrollTop = Math.min(
+                    previousScrollTop,
+                    Math.max(0, messagesList.scrollHeight - messagesList.clientHeight)
+                );
             });
         }
     }
@@ -4873,7 +5503,7 @@
         customMessages = remainingMessages;
         persistCustomMessages();
         updateMessagesUI();
-        messagesStatus.textContent = "Message removed from this device only. The server copy remains.";
+        logMessageFeedback("Message removed from this device only. The server copy remains.");
         messagesInput.focus();
     }
 
@@ -4927,6 +5557,9 @@
         launcherSettings.showMessageNotifications = false;
         settingsInputs.showMessageNotifications.checked = false;
         messageNotificationQueue = [];
+        [...messageNotificationStack.querySelectorAll(".message-notification-toast")]
+            .filter((notification) => notification !== toast)
+            .forEach((notification) => removeMessageNotification(notification));
         applyLauncherSettings();
         persistLauncherSettings();
 
@@ -4936,14 +5569,13 @@
         const heading = toast.querySelector(".message-notification-header strong");
         const eyebrow = toast.querySelector(".message-notification-eyebrow");
         const copy = toast.querySelector(".message-notification-copy");
-        const viewIcon = toast.querySelector(".message-notification-view-icon");
         const muteButton = toast.querySelector(".message-notification-mute");
         openButton.disabled = true;
         openButton.setAttribute("aria-label", "Message notifications muted");
         heading.textContent = "Notifications muted";
-        eyebrow.textContent = "Settings";
+        eyebrow.textContent = "Kour Report";
         copy.textContent = "You can turn them back on in Settings.";
-        viewIcon.remove();
+        openButton.hidden = true;
         muteButton.hidden = true;
         toast.dataset.kind = "muted";
 
@@ -4962,7 +5594,9 @@
         }
     }
 
-    function createMessageNotification(item) {
+    function createMessageNotification(item, placeAtTop = true) {
+        const existingToasts = [...messageNotificationStack.querySelectorAll(".message-notification-toast")];
+        if (existingToasts.some((toast) => toast.dataset.messageId === item.messageId)) return;
         const toast = messageNotificationTemplate.content.firstElementChild.cloneNode(true);
         toast.dataset.messageId = item.messageId;
         const copy = toast.querySelector(".message-notification-copy");
@@ -4970,8 +5604,16 @@
         const muteButton = toast.querySelector(".message-notification-mute");
         const closeButton = toast.querySelector(".message-notification-close");
         const progress = toast.querySelector(".message-notification-progress-fill");
+        const avatar = toast.querySelector(".message-notification-avatar");
+        const heading = toast.querySelector(".message-notification-header strong");
+        const senderName = typeof item.senderName === "string" && item.senderName.trim()
+            ? item.senderName.trim().slice(0, 100)
+            : "KBI";
+        avatar.src = KBI_AVATAR_URL;
         copy.textContent = item.message;
+        heading.textContent = `New message from ${senderName}`;
         openButton.dataset.messageId = item.messageId;
+        openButton.setAttribute("aria-label", `Open new message from ${senderName}`);
         openButton.addEventListener("click", (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -4987,12 +5629,16 @@
             event.stopPropagation();
             muteMessageNotifications(toast);
         });
-        addButtonPressAnimation(closeButton);
+        [closeButton, muteButton, openButton].forEach(addButtonPressAnimation);
 
         const timers = { dismiss: 0, exit: 0 };
         messageNotificationTimers.set(toast, timers);
         messageNotificationStack.hidden = false;
-        messageNotificationStack.insertBefore(toast, messageNotificationStack.firstChild);
+        if (placeAtTop) {
+            messageNotificationStack.insertBefore(toast, messageNotificationStack.firstChild);
+        } else {
+            messageNotificationStack.appendChild(toast);
+        }
         void toast.offsetWidth;
         toast.classList.add("is-entering");
         void progress.offsetWidth;
@@ -5004,20 +5650,29 @@
     }
 
     function showNextMessageNotification() {
-        if (!launcherSettings.showMessageNotifications ||
-            messageNotificationStack.querySelector(".message-notification-toast")) return;
-        const nextMessage = messageNotificationQueue.shift();
-        if (nextMessage) createMessageNotification(nextMessage);
+        if (!launcherSettings.showMessageNotifications) return;
+        const activeToasts = [...messageNotificationStack.querySelectorAll(".message-notification-toast")];
+        if (activeToasts.length >= MAX_VISIBLE_MESSAGE_NOTIFICATIONS) return;
+        while (messageNotificationQueue.length) {
+            const nextMessage = messageNotificationQueue.shift();
+            if (activeToasts.some((toast) => toast.dataset.messageId === nextMessage.messageId)) continue;
+            createMessageNotification(nextMessage, false);
+            return;
+        }
     }
 
     function showMessageNotification(item) {
         if (!launcherSettings.showMessageNotifications) return;
-        const activeToast = messageNotificationStack.querySelector(".message-notification-toast");
-        if (activeToast && activeToast.dataset.messageId === item.messageId) return;
+        if (messageNotificationIds.has(item.messageId)) return;
+        const activeToasts = [...messageNotificationStack.querySelectorAll(".message-notification-toast")];
+        if (activeToasts.some((toast) => toast.dataset.messageId === item.messageId)) return;
         if (messageNotificationQueue.some((queuedItem) => queuedItem.messageId === item.messageId)) return;
-        if (activeToast) {
-            const queueCapacity = MAX_QUEUED_MESSAGE_NOTIFICATIONS - 1;
-            while (messageNotificationQueue.length >= queueCapacity) messageNotificationQueue.shift();
+        messageNotificationIds.add(item.messageId);
+        if (messageNotificationIds.size > MAX_STORED_MESSAGES) {
+            const oldestId = messageNotificationIds.values().next().value;
+            if (oldestId) messageNotificationIds.delete(oldestId);
+        }
+        if (activeToasts.length >= MAX_VISIBLE_MESSAGE_NOTIFICATIONS) {
             messageNotificationQueue.push(item);
             return;
         }
@@ -5051,7 +5706,49 @@
         messagesIdentityValue.textContent = getMessageSenderName();
     }
 
+    function logMessageFeedback(message, level = "info") {
+        const text = typeof message === "string" ? message.trim() : "";
+        if (!text) return;
+        recordKourLog(level, `[Kour Report] Messenger: ${text}`);
+    }
+
+    function refreshDetectedMessageIdentity() {
+        renderMessageIdentity();
+        const draftName = messagesSenderInput.value.trim().toLowerCase();
+        if (messagesIdentity.hidden && (!draftName ||
+            ["no detected", "game default"].includes(draftName))) {
+            messagesSenderInput.value = getMessageSenderName();
+        }
+    }
+
+    const gameNicknameObserver = new MutationObserver(refreshDetectedMessageIdentity);
+    const gameNicknameDiscoveryObserver = new MutationObserver(() => {
+        const nicknameElement = document.getElementById("adminCurrentNickname");
+        if (!nicknameElement) return;
+        gameNicknameDiscoveryObserver.disconnect();
+        gameNicknameObserver.observe(nicknameElement, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+        });
+        refreshDetectedMessageIdentity();
+    });
+    const currentGameNicknameElement = document.getElementById("adminCurrentNickname");
+    if (currentGameNicknameElement) {
+        gameNicknameObserver.observe(currentGameNicknameElement, {
+            childList: true,
+            characterData: true,
+            subtree: true,
+        });
+    } else if (document.documentElement) {
+        gameNicknameDiscoveryObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+        });
+    }
+
     function openMessageSettings() {
+        if (activeMessageActionMenu) closeMessageActionMenu(activeMessageActionMenu.actions);
         renderMessageIdentity();
         messagesSettingsStatus.textContent = "";
         messagesIdentity.hidden = true;
@@ -5108,8 +5805,13 @@
         if (limitedMessages.length !== customMessages.length) changed = true;
         customMessages = limitedMessages;
         const saved = !changed || persistCustomMessages();
-        messagesStatus.textContent = saved ? "" : "Messages could not be saved locally.";
+        if (!saved) logMessageFeedback("Messages could not be saved locally.", "error");
         updateMessagesUI();
+        if (!messageId) {
+            window.requestAnimationFrame(() => {
+                messagesList.scrollTop = messagesList.scrollHeight;
+            });
+        }
         void markCustomMessagesRead(customMessages
             .filter((item) => item.direction === "incoming" && item.read)
             .map((item) => item.messageId));
@@ -5125,6 +5827,7 @@
     }
 
     function closeMessages() {
+        if (activeMessageActionMenu) closeMessageActionMenu(activeMessageActionMenu.actions);
         closeMessageSettings(false);
         messagesClearConfirmation.hidden = true;
         hidePopup(messagesLayer);
@@ -5177,6 +5880,7 @@
                     : `HTTP ${response.status}`;
                 throw new Error(`Could not retrieve personalized messages: ${message}`);
             }
+            lastMessagePollError = "";
             const newMessages = [];
             responseData.messages.forEach((item) => {
                 if (!item || typeof item.message !== "string" || typeof item.messageId !== "string") {
@@ -5193,14 +5897,14 @@
                     newMessages.forEach(showMessageNotification);
                 } else {
                     void markCustomMessagesRead(newMessages.map((item) => item.messageId));
-                    messagesStatus.textContent = saved ? "" : "New messages could not be saved locally.";
+                    if (!saved) logMessageFeedback("New messages could not be saved locally.", "error");
                 }
             }
-            if (!responseData.messages.length) messagesStatus.textContent = "";
         } catch (error) {
-            console.warn("[Kour Report] Personalized message polling failed:", error);
-            if (!messagesLayer.hidden) {
-                messagesStatus.textContent = error instanceof Error ? error.message : String(error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            if (errorMessage !== lastMessagePollError) {
+                logMessageFeedback(`Personalized message polling failed: ${errorMessage}`, "error");
+                lastMessagePollError = errorMessage;
             }
         } finally {
             messagePollInProgress = false;
@@ -5284,7 +5988,7 @@
         if (idValue) idValue.textContent = updatedMessage.messageId;
         const status = entry.querySelector(".messages-entry-status");
         if (status) renderOutgoingMessageStatus(status, updatedMessage);
-        if (Object.prototype.hasOwnProperty.call(patch, "status")) renderMessages();
+        if (patch.status && patch.status !== "sending") renderMessages();
     }
 
     async function sendCustomMessage(message, senderName, token, turnstileToken = null) {
@@ -5349,21 +6053,66 @@
 
     function finishOutgoingMessageSend(messageId, errorLog = null) {
         if (errorLog) {
+            recordKourLog(
+                "error",
+                `[Kour Report] Message send failed (${errorLog.code || "UNKNOWN"}): ${errorLog.message}${errorLog.details ? `\n${errorLog.details}` : ""}`
+            );
             updateOutgoingMessage(messageId, {
                 status: "error",
                 error: errorLog.message,
                 errorLog,
             });
-            messagesStatus.textContent = errorLog.message;
+        }
+        if (activeOutgoingMessageId === messageId) {
+            activeOutgoingMessageId = null;
         }
         messageSendingInProgress = false;
         messagesSendButton.disabled = !messagesInput.value.trim();
         if (!messagesLayer.hidden && !messagesLayer.classList.contains("is-closing")) {
             messagesInput.focus();
         }
+        processOutgoingMessageQueue();
     }
 
-    async function submitOutgoingMessage(messageId, message, senderName, token, turnstileToken = null) {
+    function processOutgoingMessageQueue() {
+        if (messageSendingInProgress || captchaInProgress) return;
+        const queuedMessage = outgoingMessageQueue.shift();
+        if (!queuedMessage) return;
+
+        messageSendingInProgress = true;
+        activeOutgoingMessageId = queuedMessage.messageId;
+        updateOutgoingMessage(queuedMessage.messageId, { status: "sending" });
+        void (async () => {
+            try {
+                const token = await getClientToken();
+                updateOutgoingMessage(queuedMessage.messageId, { clientToken: token });
+                await submitOutgoingMessage(
+                    queuedMessage.messageId,
+                    queuedMessage.message,
+                    queuedMessage.senderName,
+                    token
+                );
+            } catch (error) {
+                console.error("[Kour Report] Could not prepare the client message:", error);
+                const errorLog = createOutgoingMessageErrorLog(
+                    null,
+                    null,
+                    "",
+                    error instanceof Error ? error.message : String(error),
+                    "MESSAGE_PREPARATION_FAILED"
+                );
+                finishOutgoingMessageSend(queuedMessage.messageId, errorLog);
+            }
+        })();
+    }
+
+    async function submitOutgoingMessage(
+        messageId,
+        message,
+        senderName,
+        token,
+        turnstileToken = null
+    ) {
         let result;
         try {
             result = await sendCustomMessage(message, senderName, token, turnstileToken);
@@ -5388,10 +6137,18 @@
                 (result.status === 403 &&
                     data?.code !== "KOUR_REPORT_MESSAGES_API_CLIENT_BLOCKED"));
         if (captchaRequired || rejectedCaptcha) {
-            if (captchaRequired) {
-                messagesStatus.textContent = "Complete the security check to send this message.";
-            } else {
-                messagesStatus.textContent = "The security check was rejected. Please complete a fresh check.";
+            if (rejectedCaptcha) {
+                const errorLog = createOutgoingMessageErrorLog(
+                    result.status,
+                    data,
+                    result.rawText,
+                    "The security check was rejected. Please complete a fresh check.",
+                    "CAPTCHA_REJECTED"
+                );
+                recordKourLog(
+                    "error",
+                    `[Kour Report] Message security verification was rejected (${errorLog.code || "UNKNOWN"}): ${errorLog.message}${errorLog.details ? `\n${errorLog.details}` : ""}`
+                );
             }
             void openVerificationDialog(null, {
                 messageId,
@@ -5412,8 +6169,6 @@
                 error: "",
                 errorLog: undefined,
             });
-            if (messagesInput.value.trim() === message) messagesInput.value = "";
-            messagesStatus.textContent = "";
             finishOutgoingMessageSend(messageId);
             return;
         }
@@ -5617,7 +6372,6 @@
         reportHistoryCount.textContent = String(reportHistory.length);
         reportHistoryButton.setAttribute("aria-label", `Report history, ${reportHistory.length} reports`);
         const historyCounts = {
-            all: reportHistory.length,
             real: reportHistory.filter((entry) => entry.testMode !== true).length,
             test: reportHistory.filter((entry) => entry.testMode === true).length,
         };
@@ -5627,17 +6381,14 @@
             button.querySelector(".report-history-tab-count").textContent = String(historyCounts[filter]);
         });
         const visibleHistory = reportHistory.filter((entry) =>
-            reportHistoryFilter === "all" ||
             (reportHistoryFilter === "test" && entry.testMode === true) ||
             (reportHistoryFilter === "real" && entry.testMode !== true)
         );
         reportHistoryEmpty.hidden = visibleHistory.length > 0;
         reportHistoryList.hidden = visibleHistory.length === 0;
-        reportHistoryEmpty.textContent = reportHistoryFilter === "all"
-            ? "Reports confirmed by the API on this browser will appear here."
-            : reportHistoryFilter === "test"
-                ? "No test reports yet."
-                : "No real reports yet.";
+        reportHistoryEmpty.textContent = reportHistoryFilter === "test"
+            ? "No test reports yet."
+            : "No real reports yet.";
         reportHistoryStatus.textContent = "";
         reportHistoryClearButton.disabled = reportHistory.length === 0;
         const scopeLabels = { all: "All reports", test: "Test reports", real: "Real reports" };
@@ -5999,9 +6750,16 @@
                 showMessageNotifications: typeof savedSettings.showMessageNotifications === "boolean"
                     ? savedSettings.showMessageNotifications
                     : DEFAULT_LAUNCHER_SETTINGS.showMessageNotifications,
+                messageNotificationPosition: MESSAGE_NOTIFICATION_POSITIONS
+                    .includes(savedSettings.messageNotificationPosition)
+                    ? savedSettings.messageNotificationPosition
+                    : DEFAULT_LAUNCHER_SETTINGS.messageNotificationPosition,
                 announceRoomJoin: typeof savedSettings.announceRoomJoin === "boolean"
                     ? savedSettings.announceRoomJoin
                     : DEFAULT_LAUNCHER_SETTINGS.announceRoomJoin,
+                announcePlayerReports: typeof savedSettings.announcePlayerReports === "boolean"
+                    ? savedSettings.announcePlayerReports
+                    : DEFAULT_LAUNCHER_SETTINGS.announcePlayerReports,
                 opacity: Number.isFinite(savedSettings.opacity)
                     ? Math.min(100, Math.max(10, savedSettings.opacity))
                     : DEFAULT_LAUNCHER_SETTINGS.opacity,
@@ -6401,8 +7159,7 @@
         const callHovered = callVisible &&
             (launcherQuickCall.matches(":hover") || shadow.activeElement === launcherQuickCall);
         const messagesVisible = launcherQuickMessages.classList.contains("is-visible");
-        const messagesHovered = messagesVisible &&
-            (launcherQuickMessages.matches(":hover") || shadow.activeElement === launcherQuickMessages);
+        const messagesHovered = messagesVisible && launcherQuickMessages.matches(":hover");
         const launcherVisible = !launcherSettings.hideIcon &&
             !launcherSettings.hideBothButtons;
         const launcherExpanded = launcherVisible && launcherHovered;
@@ -6491,7 +7248,26 @@
         settingsInputs.testMode.checked = launcherSettings.testMode;
         settingsInputs.showUpdateNotifications.checked = launcherSettings.showUpdateNotifications;
         settingsInputs.showMessageNotifications.checked = launcherSettings.showMessageNotifications;
+        const selectedPositionOption = settingsPositionOptions.find(
+            (option) => option.dataset.position === launcherSettings.messageNotificationPosition
+        );
+        if (selectedPositionOption) {
+            settingsInputs.messageNotificationPosition.querySelector(".reason-trigger-label").textContent =
+                selectedPositionOption.querySelector(".settings-position-option-label").textContent;
+        }
+        settingsPositionOptions.forEach((option) => {
+            const selected = option.dataset.position === launcherSettings.messageNotificationPosition;
+            option.setAttribute("aria-selected", String(selected));
+        });
+        messageNotificationStack.classList.remove(
+            "is-top-right",
+            "is-top-left",
+            "is-bottom-right",
+            "is-bottom-left"
+        );
+        messageNotificationStack.classList.add(`is-${launcherSettings.messageNotificationPosition}`);
         settingsInputs.announceRoomJoin.checked = launcherSettings.announceRoomJoin;
+        settingsInputs.announcePlayerReports.checked = launcherSettings.announcePlayerReports;
         settingsInputs.opacity.value = String(launcherSettings.opacity);
         settingsInputs.size.value = String(launcherSettings.size);
         shadow.querySelector('[data-value="opacity"]').textContent = `${launcherSettings.opacity}%`;
@@ -6704,6 +7480,7 @@
      * @see document keydown handler
      */
     function closeSettingsDialog() {
+        setSettingsPositionMenuOpen(false);
         capturingKeySetting = null;
         settingsKeyHint.hidden = true;
         updateSettingsKeyLabels();
@@ -6717,12 +7494,69 @@
         settingsButton.focus();
     }
 
+    function closeErrorLogViewer() {
+        hidePopup(errorLogLayer);
+        settingsLayer.inert = false;
+        settingsLayer.removeAttribute("aria-hidden");
+        settingsLogOpenButton.focus();
+    }
+
     // Settings handlers manage the dialog, hide-icon warning, and shortcut capture.
     settingsButton.addEventListener("click", () => {
         clientTokenVisible = false;
         renderClientToken();
         showPopup(settingsLayer);
         settingsCloseButton.focus();
+    });
+    settingsLogOpenButton.addEventListener("click", () => {
+        capturingKeySetting = null;
+        settingsKeyHint.hidden = true;
+        updateSettingsKeyLabels();
+        renderKourLogViewer();
+        kourLogStatus.textContent = "";
+        kourLogStatus.classList.remove("is-error");
+        settingsLayer.inert = true;
+        settingsLayer.setAttribute("aria-hidden", "true");
+        showPopup(errorLogLayer);
+        errorLogCloseButton.focus();
+    });
+    errorLogCloseButton.addEventListener("click", closeErrorLogViewer);
+    errorLogLayer.addEventListener("click", (event) => {
+        if (event.target === errorLogLayer) closeErrorLogViewer();
+    });
+    [settingsLogOpenButton, kourLogCopyButton, kourLogClearButton].forEach((button) => addButtonPressAnimation(button));
+    kourLogCopyButton.addEventListener("click", async () => {
+        loadKourLogEntries();
+        if (!kourLogEntries.length) {
+            kourLogStatus.textContent = "There are no logs to copy.";
+            kourLogStatus.classList.remove("is-error");
+            return;
+        }
+        const content = kourLogEntries.map((entry) =>
+            `[${entry.timestamp}] ${entry.level.toUpperCase()}\n${entry.message}`
+        ).join("\n\n");
+        try {
+            await writeTextToClipboard(content);
+            kourLogStatus.textContent = `Copied ${kourLogEntries.length} log entries.`;
+            kourLogStatus.classList.remove("is-error");
+        } catch (error) {
+            console.error("[Kour Report] Could not copy diagnostic logs:", error);
+            kourLogStatus.textContent = "Could not copy the logs.";
+            kourLogStatus.classList.add("is-error");
+        }
+    });
+    kourLogClearButton.addEventListener("click", () => {
+        try {
+            window.localStorage.setItem(KOUR_LOG_STORAGE_KEY, "[]");
+            kourLogEntries.length = 0;
+            renderKourLogViewer();
+            kourLogStatus.textContent = "Logs cleared.";
+            kourLogStatus.classList.remove("is-error");
+        } catch (error) {
+            console.error("[Kour Report] Could not clear diagnostic logs:", error);
+            kourLogStatus.textContent = "Could not clear the logs.";
+            kourLogStatus.classList.add("is-error");
+        }
     });
     settingsHideIconRow.addEventListener("pointerenter", (event) => {
         showSettingsTooltipAt(event.clientX, event.clientY);
@@ -6744,25 +7578,23 @@
             settingsHideIconWarning.hidden = true;
         }
     });
-    settingsTestModeRow.addEventListener("pointerenter", (event) => {
+    settingsTestModeHelp.addEventListener("pointerenter", (event) => {
         showTestModeTooltipAt(event.clientX, event.clientY);
     });
-    settingsTestModeRow.addEventListener("pointermove", (event) => {
+    settingsTestModeHelp.addEventListener("pointermove", (event) => {
         if (!settingsTestModeTooltip.hidden) {
             showTestModeTooltipAt(event.clientX, event.clientY);
         }
     });
-    settingsTestModeRow.addEventListener("pointerleave", () => {
+    settingsTestModeHelp.addEventListener("pointerleave", () => {
         settingsTestModeTooltip.hidden = true;
     });
-    settingsTestModeRow.addEventListener("focusin", () => {
-        const bounds = settingsTestModeRow.getBoundingClientRect();
+    settingsTestModeHelp.addEventListener("focus", () => {
+        const bounds = settingsTestModeHelp.getBoundingClientRect();
         showTestModeTooltipAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
     });
-    settingsTestModeRow.addEventListener("focusout", (event) => {
-        if (!settingsTestModeRow.contains(event.relatedTarget)) {
-            settingsTestModeTooltip.hidden = true;
-        }
+    settingsTestModeHelp.addEventListener("blur", () => {
+        settingsTestModeTooltip.hidden = true;
     });
     settingsAnnouncementRow.addEventListener("pointerenter", (event) => {
         showAnnouncementTooltipAt(event.clientX, event.clientY);
@@ -6784,25 +7616,23 @@
             settingsAnnouncementTooltip.hidden = true;
         }
     });
-    settingsClientTokenRow.addEventListener("pointerenter", (event) => {
+    settingsClientTokenHelp.addEventListener("pointerenter", (event) => {
         showClientTokenTooltipAt(event.clientX, event.clientY);
     });
-    settingsClientTokenRow.addEventListener("pointermove", (event) => {
+    settingsClientTokenHelp.addEventListener("pointermove", (event) => {
         if (!settingsClientTokenTooltip.hidden) {
             showClientTokenTooltipAt(event.clientX, event.clientY);
         }
     });
-    settingsClientTokenRow.addEventListener("pointerleave", () => {
+    settingsClientTokenHelp.addEventListener("pointerleave", () => {
         settingsClientTokenTooltip.hidden = true;
     });
-    settingsClientTokenRow.addEventListener("focusin", () => {
-        const bounds = settingsClientTokenRow.getBoundingClientRect();
+    settingsClientTokenHelp.addEventListener("focus", () => {
+        const bounds = settingsClientTokenHelp.getBoundingClientRect();
         showClientTokenTooltipAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
     });
-    settingsClientTokenRow.addEventListener("focusout", (event) => {
-        if (!settingsClientTokenRow.contains(event.relatedTarget)) {
-            settingsClientTokenTooltip.hidden = true;
-        }
+    settingsClientTokenHelp.addEventListener("blur", () => {
+        settingsClientTokenTooltip.hidden = true;
     });
     settingsClientTokenToggleButton.addEventListener("click", () => {
         clientTokenVisible = !clientTokenVisible;
@@ -6827,11 +7657,74 @@
         }
     });
     settingsCloseButton.addEventListener("click", closeSettingsDialog);
+    function setSettingsPositionMenuOpen(open, focusSelected = false) {
+        settingsPositionOptionsMenu.hidden = !open;
+        settingsInputs.messageNotificationPosition.setAttribute("aria-expanded", String(open));
+        if (open && focusSelected) {
+            const selectedOption = settingsPositionOptions.find(
+                (option) => option.dataset.position === launcherSettings.messageNotificationPosition
+            );
+            (selectedOption || settingsPositionOptions[0]).focus();
+        }
+    }
     settingsLayer.addEventListener("click", (event) => {
-        if (event.target === settingsLayer) closeSettingsDialog();
+        if (event.target === settingsLayer) {
+            setSettingsPositionMenuOpen(false);
+            closeSettingsDialog();
+        } else if (!settingsPositionSelect.contains(event.target)) {
+            setSettingsPositionMenuOpen(false);
+        }
+    });
+    settingsInputs.messageNotificationPosition.addEventListener("click", () => {
+        const opening = settingsPositionOptionsMenu.hidden;
+        setSettingsPositionMenuOpen(opening, opening);
+    });
+    settingsPositionSelect.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !settingsPositionOptionsMenu.hidden) {
+            event.preventDefault();
+            event.stopPropagation();
+            setSettingsPositionMenuOpen(false);
+            settingsInputs.messageNotificationPosition.focus();
+            return;
+        }
+        if (event.target === settingsInputs.messageNotificationPosition &&
+            ["ArrowDown", "ArrowUp"].includes(event.key)) {
+            event.preventDefault();
+            setSettingsPositionMenuOpen(true, true);
+            return;
+        }
+        const option = event.target.closest(".settings-position-option");
+        if (!option) return;
+        const currentIndex = settingsPositionOptions.indexOf(option);
+        const nextIndex = event.key === "ArrowDown"
+            ? (currentIndex + 1) % settingsPositionOptions.length
+            : event.key === "ArrowUp"
+                ? (currentIndex - 1 + settingsPositionOptions.length) % settingsPositionOptions.length
+                : event.key === "Home"
+                    ? 0
+                    : event.key === "End"
+                        ? settingsPositionOptions.length - 1
+                        : -1;
+        if (nextIndex >= 0) {
+            event.preventDefault();
+            settingsPositionOptions[nextIndex].focus();
+        }
+    });
+    settingsPositionOptions.forEach((option) => {
+        addButtonPressAnimation(option);
+        option.addEventListener("click", () => {
+            const selectedPosition = option.dataset.position;
+            if (!MESSAGE_NOTIFICATION_POSITIONS.includes(selectedPosition)) return;
+            launcherSettings.messageNotificationPosition = selectedPosition;
+            applyLauncherSettings();
+            persistLauncherSettings();
+            setSettingsPositionMenuOpen(false);
+            settingsInputs.messageNotificationPosition.focus();
+        });
     });
     [
         ...Object.values(settingsKeyButtons),
+        settingsInputs.messageNotificationPosition,
         settingsResetButton,
         roomAnnouncementSendButton,
         settingsClientTokenToggleButton,
@@ -6849,6 +7742,7 @@
         settingsInputs.showUpdateNotifications,
         settingsInputs.showMessageNotifications,
         settingsInputs.announceRoomJoin,
+        settingsInputs.announcePlayerReports,
     ].forEach((checkbox) => {
         addButtonPressAnimation(checkbox);
     });
@@ -6917,6 +7811,10 @@
         } else {
             cancelScheduledReportRoomAnnouncement();
         }
+        persistLauncherSettings();
+    });
+    settingsInputs.announcePlayerReports.addEventListener("change", () => {
+        launcherSettings.announcePlayerReports = settingsInputs.announcePlayerReports.checked;
         persistLauncherSettings();
     });
     roomAnnouncementSendButton.addEventListener("click", () => {
@@ -7550,6 +8448,7 @@
             const callKey = pendingCallPlayerKey;
             const messagePayload = pendingMessageCaptcha;
             resetReportCaptcha();
+            recordKourLog("error", `[Kour Report] Security verification failed: ${message}`);
             if (messagePayload) {
                 finishOutgoingMessageSend(messagePayload.messageId, createOutgoingMessageErrorLog(
                     null, null, "", message, "CAPTCHA_VERIFICATION_FAILED"
@@ -7580,15 +8479,18 @@
 
     function getReportIdentity() {
         let reporter = "";
+        let gameWindow = window;
         const normalizeReporter = (value) => {
             const normalized = normalizePlayerName(value);
             return normalized && normalized.toLowerCase() !== "you" &&
-                normalized.toLowerCase() !== "game default"
+                normalized.toLowerCase() !== "game default" &&
+                normalized.toLowerCase() !== "no detected" &&
+                normalized.toLowerCase() !== "not detected"
                 ? normalized
                 : "";
         };
         try {
-            const gameWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+            if (typeof unsafeWindow !== "undefined") gameWindow = unsafeWindow;
             reporter = normalizeReporter(
                 gameWindow.firebase?.auth?.()?.currentUser?.displayName ||
                 gameWindow.firebase?.auth?.()?.currentUser?.providerData?.[0]?.displayName
@@ -7596,34 +8498,42 @@
         } catch (error) {
             console.warn("[Kour Report] Could not read the Firebase player name:", error);
         }
-        if (!reporter) reporter = normalizeReporter(reportMatchState.localName);
         if (!reporter) {
-            try {
-                const usernameKeys = [
-                    "playerNickname", "playerUsername", "username", "userName",
-                    "nickname", "displayName", "gameUsername", "guestUsername"
-                ];
-                for (const key of usernameKeys) {
-                    reporter = normalizeReporter(window.localStorage.getItem(key));
-                    if (reporter) break;
-                }
-                if (!reporter) {
-                    for (let index = 0; index < window.localStorage.length; index += 1) {
-                        const key = window.localStorage.key(index);
-                        if (!key || !/(^|[_:-])(user(name)?|nick(name)?|player(name)?|displayName)([_:-]|$)/i.test(key)) continue;
-                        reporter = normalizeReporter(window.localStorage.getItem(key));
+            const usernameKeys = [
+                "playerNickname", "playerUsername", "username", "userName",
+                "nickname", "displayName", "gameUsername", "guestUsername"
+            ];
+            const storageOwners = gameWindow === window ? [gameWindow] : [gameWindow, window];
+            for (const owner of storageOwners) {
+                try {
+                    const storage = owner.localStorage;
+                    if (!storage) continue;
+                    for (const key of usernameKeys) {
+                        reporter = normalizeReporter(storage.getItem(key));
                         if (reporter) break;
                     }
+                    if (!reporter) {
+                        for (let index = 0; index < storage.length; index += 1) {
+                            const key = storage.key(index);
+                            if (!key || !/(^|[_:-])(user(name)?|nick(name)?|player(name)?|displayName)([_:-]|$)/i.test(key)) continue;
+                            reporter = normalizeReporter(storage.getItem(key));
+                            if (reporter) break;
+                        }
+                    }
+                } catch (error) {
+                    console.warn("[Kour Report] Could not read the saved game username:", error);
                 }
-            } catch (error) {
-                console.warn("[Kour Report] Could not read the saved game username:", error);
+                if (reporter) break;
             }
         }
+        if (!reporter) reporter = normalizeReporter(observedGameNickname);
+        if (!reporter) reporter = normalizeReporter(reportMatchState.localName);
         if (!reporter) {
             reporter = normalizeReporter(
                 document.getElementById("adminCurrentNickname")?.textContent
             );
         }
+        if (!reporter) reporter = normalizeReporter(observedGameGuestName);
         if (!reporter && reportMatchState.localId !== null &&
             String(reportMatchState.localId).trim()) {
             reporter = `Guest_${reportMatchState.localId}`;
@@ -8383,6 +9293,7 @@
     reportHistoryButton.addEventListener("click", () => {
         closeReportHistoryClearPanel();
         reportHistoryClearStatus.hidden = true;
+        reportHistoryFilter = "real";
         renderReportHistory();
         showPopup(reportHistoryLayer);
         reportHistoryCloseButton.focus();
@@ -8469,45 +9380,46 @@
         updateMessagesUI();
         renderMessages();
         messagesClearConfirmation.hidden = true;
-        messagesStatus.textContent = "Message history cleared.";
+        logMessageFeedback("Message history cleared.");
         messagesSettingsStatus.textContent = "Message history cleared from this device.";
         messagesClearButton.focus();
     });
     messagesLayer.addEventListener("click", (event) => {
         if (event.target === messagesLayer) closeMessages();
     });
+    messagesList.addEventListener("scroll", () => {
+        if (activeMessageActionMenu) closeMessageActionMenu(activeMessageActionMenu.actions);
+    }, { passive: true });
+    window.addEventListener("resize", positionActiveMessageActionMenu);
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", positionActiveMessageActionMenu);
+    }
     messagesInput.addEventListener("input", () => {
-        messagesSendButton.disabled = messageSendingInProgress || !messagesInput.value.trim();
+        messagesSendButton.disabled = !messagesInput.value.trim();
     });
-    messagesCompose.addEventListener("submit", async (event) => {
+    messagesCompose.addEventListener("submit", (event) => {
         event.preventDefault();
-        if (messageSendingInProgress || captchaInProgress || reportSubmitting) return;
+        if (captchaInProgress || reportSubmitting) return;
         const message = messagesInput.value.trim();
         if (!message) {
-            messagesStatus.textContent = "Enter a message before sending.";
+            logMessageFeedback("Message not sent because the message field was empty.", "warning");
             messagesInput.focus();
             return;
         }
-        const senderName = messagesSenderInput.value.trim() || getMessageSenderName();
-        messageSendingInProgress = true;
+        const draftSenderName = messagesSenderInput.value.trim();
+        const senderName = draftSenderName &&
+            !["no detected", "game default"].includes(draftSenderName.toLowerCase())
+            ? draftSenderName
+            : getMessageSenderName();
         messagesSendButton.disabled = true;
-        messagesStatus.textContent = "";
         const outgoing = storeOutgoingMessage(message, senderName, "sending");
-        try {
-            const token = await getClientToken();
-            updateOutgoingMessage(outgoing.messageId, { clientToken: token });
-            await submitOutgoingMessage(outgoing.messageId, message, senderName, token);
-        } catch (error) {
-            console.error("[Kour Report] Could not prepare the client message:", error);
-            const errorLog = createOutgoingMessageErrorLog(
-                null,
-                null,
-                "",
-                error instanceof Error ? error.message : String(error),
-                "MESSAGE_PREPARATION_FAILED"
-            );
-            finishOutgoingMessageSend(outgoing.messageId, errorLog);
-        }
+        messagesInput.value = "";
+        outgoingMessageQueue.push({
+            messageId: outgoing.messageId,
+            message,
+            senderName,
+        });
+        processOutgoingMessageQueue();
     });
     window.addEventListener("storage", (event) => {
         if (event.key !== MESSAGE_STORAGE_KEY) return;
@@ -8756,6 +9668,68 @@
         reportFormStatus.hidden = true;
         void sendReport(pendingReportPayload, null);
     });
+
+    function loadPlayerReportAnnouncementKeys() {
+        if (playerReportAnnouncementKeysLoaded) return;
+        playerReportAnnouncementKeysLoaded = true;
+        try {
+            const savedKeys = JSON.parse(
+                window.localStorage.getItem(PLAYER_REPORT_ANNOUNCEMENTS_STORAGE_KEY) || "[]"
+            );
+            if (Array.isArray(savedKeys)) {
+                savedKeys.forEach((key) => {
+                    if (typeof key === "string" && key.length <= 2048) {
+                        announcedPlayerReportKeys.add(key);
+                    }
+                });
+            }
+        } catch (error) {
+            console.warn("[Kour Report] Could not load announced player reports:", error);
+        }
+    }
+
+    function announceSuccessfulPlayerReport(reportPayload, reminderType, callPlayerKey) {
+        const selectedPlayerReport = callPlayerKey === null
+            ? reminderType === "player-report"
+            : callPlayerKey !== MENU_CALL_PLAYER_KEY;
+        if (!launcherSettings.announcePlayerReports || !selectedPlayerReport) return;
+
+        const roomId = String(reportPayload.roomId || "").trim();
+        const currentRoomId = window.location.hash.slice(1).trim();
+        const target = normalizePlayerName(reportPayload.target);
+        if (!roomId || roomId.toLowerCase() !== currentRoomId.toLowerCase() || !target) return;
+        const playerName = target.replace(/^\[[^\]]{1,32}\]\s*/, "");
+        if (!playerName) return;
+
+        loadPlayerReportAnnouncementKeys();
+        const announcementKey = JSON.stringify([roomId.toLowerCase(), playerName.toLowerCase()]);
+        const legacyAnnouncementKey = JSON.stringify([roomId.toLowerCase(), target.toLowerCase()]);
+        if (announcedPlayerReportKeys.has(announcementKey) ||
+            announcedPlayerReportKeys.has(legacyAnnouncementKey)) return;
+
+        const safeTarget = playerName.replace(/[&<>]/g, (character) => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+        })[character]);
+        const message =
+            `<color=#ed3434>[Kour Report]</color> <color=#ffffff>Player ${safeTarget} was reported.</color>`;
+        if (!sendReportChatAnnouncement(message)) {
+            console.warn("[Kour Report] The report succeeded, but its chat announcement could not be sent.");
+            return;
+        }
+
+        announcedPlayerReportKeys.add(announcementKey);
+        try {
+            window.localStorage.setItem(
+                PLAYER_REPORT_ANNOUNCEMENTS_STORAGE_KEY,
+                JSON.stringify([...announcedPlayerReportKeys])
+            );
+        } catch (error) {
+            console.warn("[Kour Report] Could not save announced player reports:", error);
+        }
+    }
+
     /***************************************
      * Report Submission
      ***************************************/
@@ -8883,14 +9857,17 @@
                     submittedAt: Date.now(),
                 };
                 recordReportHistory(historyEntry);
-                recordReportActivity(
-                    historyEntry,
-                    callPlayerKey !== null
-                        ? "kbi-call"
-                        : reminderType === "manual-report"
-                            ? "manual-report"
-                            : "player-report"
-                );
+                if (!useTestEndpoint) {
+                    recordReportActivity(
+                        historyEntry,
+                        callPlayerKey !== null
+                            ? "kbi-call"
+                            : reminderType === "manual-report"
+                                ? "manual-report"
+                                : "player-report"
+                    );
+                    announceSuccessfulPlayerReport(reportPayload, reminderType, callPlayerKey);
+                }
                 if (callPlayerKey !== null) {
                     const callLabel = useTestEndpoint ? "Test KBI call" : "KBI call";
                     const callSuccessMessage = reportId
@@ -8923,6 +9900,7 @@
                 const errorMessage = limitServerResponse(
                     `${serverMessage || `No response body received (HTTP ${response.status}).`}${retryMessage}`
                 );
+                recordKourLog("error", `[Kour Report] Report submission rejected: ${errorMessage}`);
                 if (callPlayerKey !== null) {
                     if (apiRateLimited && retryAfterSeconds !== null && retryAfterSeconds > 0) {
                         setCallKbiButtonState(
@@ -9013,6 +9991,10 @@
         if (event.key === "Escape" && !changelogLayer.hidden) {
             hidePopup(changelogLayer);
             changelogButton.focus();
+            return;
+        }
+        if (event.key === "Escape" && !errorLogLayer.hidden) {
+            closeErrorLogViewer();
             return;
         }
         if (event.key === "Escape" && !settingsLayer.hidden) {
